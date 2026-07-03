@@ -1,10 +1,12 @@
 # AgentRoom Product Spec
 
+> **2026-07-03 更新**：按批准设计（design/agentroom-design-approved.md）更新。V1 = 走廊（黑盒无头进程）+ 多工具同屏教室 TUI。本文档描述的完整愿景中，部分功能（细粒度状态、agent/skill 显示、hooks）推迟到 V1 之后。
+
 ## Positioning
 
 AgentRoom is a local CLI classroom for coding agents.
 
-The user acts like a teacher with a full classroom view. Each local coding CLI instance is a seat in the classroom, such as `Codex #1`, `Claude #1`, or `Gemini #1`. The user can see who is working, who is idle, who is blocked, who is waiting for approval, and what each agent is currently doing.
+The user acts like a teacher with a full classroom view. Each local coding CLI instance is a seat in the classroom, such as `Codex #1`, `Claude #1`, or `Gemini #1`. The user can see who is working, who is idle, ~~who is blocked~~, ~~who is waiting for approval~~, and what each agent is currently doing.
 
 AgentRoom is not intended to replace Codex, Claude Code, Gemini, or other coding tools. It is a local orchestration and visibility layer above them.
 
@@ -16,7 +18,7 @@ AgentRoom is not intended to replace Codex, Claude Code, Gemini, or other coding
 ## First Supported Runners
 
 - Codex CLI
-- Claude Code
+- Claude Code (claude -p 无头模式)
 - Gemini CLI
 
 More runners should be possible later through adapter modules.
@@ -31,73 +33,90 @@ The user wants to:
 - Assign work to each instance.
 - Let agents review or continue each other's work.
 - Share useful context without mixing every transcript together.
-- Reuse agents, skills, and hooks from local/global/project/tool configurations.
+- ~~Reuse agents, skills, and hooks from local/global/project/tool configurations.~~ （V1 推迟）
 - See status visually inside the terminal.
 
 ## Classroom Metaphor
 
 AgentRoom uses classroom concepts:
 
-- Blackboard: shared task, summaries, facts, claims, decisions, open questions.
+- Blackboard: ~~shared task, summaries, facts, claims, decisions, open questions.~~ （V1 只显示会话标题）
 - Seat: one running CLI instance, for example `Codex #1`.
 - Desk: details for the selected seat.
 - Assignment: a task given to one seat.
-- Homework: diff, patch, report, test output, summary.
+- Homework: diff, patch, ~~report~~, ~~test output~~, summary.
 - Hand-off: passing one seat's output to another seat.
-- Memory: approved long-term project/user knowledge.
+- ~~Memory: approved long-term project/user knowledge.~~ （V1 推迟）
 
-## Main Screen
+## Main Screen（V1 版本）
 
 The TUI should show a clear classroom status view:
 
 ```text
------------------------------ AgentRoom -----------------------------+
-| Blackboard: Fix login timeout bug and add regression tests          |
-| Project: chanel        Session: sess_20260702_001                  |
-+---------------------------------------------------------------------+
-| [ Codex #1 ]      [ Codex #2 ]      [ Claude #1 ]     [ Gemini #1 ] |
-| coding            idle             reviewing        waiting         |
-| A: implementer    -                A: reviewer      A: checker      |
-| S: bugfix         -                S: code-review   S: risk-check   |
-+---------------------------------------------------------------------+
-| Desk: Codex #1                                                       |
-| Current: editing src/auth/session.ts                                 |
-| Task: Fix login timeout bug with minimum changes                     |
-| Hooks: before_assignment success | after_assignment running          |
-| Files: M src/auth/session.ts, M src/auth/session.test.ts             |
-| Activity: reading file, editing file, running test                   |
-+---------------------------------------------------------------------+
+┌─ AgentRoom ─ Session sess_20260702_001 ─ 00:15:32 ───────────────┐
+│ Blackboard: Fix login timeout bug and add regression tests        │
+└────────────────────────────────────────────────────────────────────┘
+
+┌─ Codex #1 ────────┐  ┌─ Claude #1 ───────┐
+│ Status: running    │  │ Status: idle       │
+│ Task: Fix bug      │  │ Task: —            │
+└────────────────────┘  └────────────────────┘
+
+┌─ Desk: Codex #1 ───────────────────────────────────────────────────┐
+│ Current: editing src/auth/session.ts                                │
+│ Task: Fix login timeout bug with minimum changes                    │
+│ Files: M src/auth/session.ts, M src/auth/session.test.ts            │
+│ Activity:                                                            │
+│   [12:30:16] Runner started (codex exec)                             │
+│   [12:30:45] Writing src/auth/session.ts...                          │
+│   [12:31:02] Running tests...                                        │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-The actual terminal UI can be prettier than ASCII, but the layout must preserve:
+**V1 简化说明**：
+- 去掉 `A: agent` / `S: skill` 标签（registry 推迟）
+- 去掉 `Hooks:` 行（hooks 推迟）
+- Seat 状态只显示 6 态（idle/queued/running/done/failed/stopped），不显示细粒度状态
+- Activity 简化为 transcript tail（最近 N 行）
 
-- Blackboard at the top.
-- Seats in the center.
-- Selected seat desk at the bottom.
+完整版（包含 agent/skill/hooks）是原 Main Screen，推迟到 V1 之后。
 
-## Seat Status
+## Seat Status（V1 版本）
 
-Seat states must be easy to read:
+V1 seat states:
 
 - `idle`: empty / ready.
 - `queued`: waiting for assignment.
-- `reading`: reading files or context.
-- `coding`: editing code.
-- `testing`: running or writing tests.
-- `reviewing`: reviewing another agent's output.
-- `checking`: checking risk, safety, edge cases.
-- `waiting_user`: raising hand, needs user action.
-- `blocked`: stuck.
+- `running`: executing (黑盒进程运行中，不细分 reading/coding/testing).
 - `done`: completed.
 - `failed`: failed.
 - `stopped`: stopped by user.
 
-## Color Rules
+**推迟到 V1 之后的细粒度状态**（需要深度集成）：
+- ~~`reading`~~: reading files or context.
+- ~~`coding`~~: editing code.
+- ~~`testing`~~: running or writing tests.
+- ~~`reviewing`~~: reviewing another agent's output.
+- ~~`checking`~~: checking risk, safety, edge cases.
+- ~~`waiting_user`~~: raising hand, needs user action.
+- ~~`blocked`~~: stuck.
 
-Color is part of the product experience.
+## Color Rules（V1 版本）
 
-- Runner color identifies the tool.
-- Agent color identifies the role.
+~~Color is part of the product experience.~~ （完整配色体系推迟到 V1 之后）
+
+V1 color rules:
+
+- **Runner color** identifies the tool type:
+  - Codex: 蓝色系
+  - Claude: 橙色系
+  - Gemini: 紫色系
+
+**推迟到 V1 之后**：
+- ~~Agent color identifies the role.~~
+- ~~Skill color identifies the skill type.~~
+- ~~Hook color identifies the hook type.~~
+- ~~四色分类法（runner/agent/skill/hook）~~
 - Skill color identifies the capability.
 - Hook color identifies status/risk.
 

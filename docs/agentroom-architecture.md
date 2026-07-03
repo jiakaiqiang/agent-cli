@@ -1,37 +1,50 @@
 # AgentRoom Architecture
 
+> **2026-07-03 更新**：本文档已按批准设计（design/agentroom-design-approved.md）调整。V1 = 黑盒无头进程 + 多工具同屏教室 TUI。Registry/hooks/flow/memory 推迟到 V1 之后。
+
 ## Technical Stack
 
-MVP stack:
+V1 stack:
 
 - Language: TypeScript
 - Runtime: Node.js
-- CLI parser: commander or clipanion
 - TUI: Ink + React
-- Process execution: Node `child_process` or `execa`
-- Config: YAML and JSON
+- Process execution: Node `child_process` or `execa`（黑盒无头进程，管道读输出）
+- Config: 最小化（V1 只需三家 CLI 路径探测）
 - Storage: filesystem + JSONL
-- Database: none in MVP
+- Database: none
 
-The MVP should avoid a database. Files are easier to inspect, copy, debug, and open source.
+**推迟到 V1 之后**：
+- CLI parser (commander/clipanion) —— V1 可直接 `tsx src/...`
+- YAML config —— V1 配置最小化
+- Registry system —— agents/skills/hooks/flows 全部推迟
 
-## Top-Level Modules
+## Top-Level Modules（V1 精简）
 
 ```text
-packages/
-  cli/
-    command entrypoint and TUI launcher
-  core/
-    classroom, assignments, runners, registry, memory, hooks
+src/
+  probe.ts          # 三家 CLI 无头模式探测实验
+  corridor.ts       # 单座位派发 → worktree 执行 → 回收
+  contextpack.ts    # 双座位交接 ContextPack 组装
   tui/
-    Ink UI components
+    App.tsx         # Ink TUI 主界面
+    SeatCard.tsx    # 座位卡片组件
+    DeskPanel.tsx   # 座位详情面板
   adapters/
-    codex, claude, gemini runner adapters
-  builtin/
-    default agents, skills, hooks, flows
+    runner.ts       # 通用黑盒子进程管理
+    codex.ts        # Codex 启动命令模板（probe 后确认）
+    claude.ts       # Claude 启动命令模板
+    gemini.ts       # Gemini 启动命令模板
+  types.ts          # Assignment / ContextPack / AgentRoomEvent 子集
+  storage.ts        # events.jsonl / 座位文件读写
 ```
 
-If using a single package first, preserve the same internal module boundaries under `src/`.
+**不在 V1 范围**：
+- `registry/` —— 推迟
+- `memory/` —— 推迟
+- `hooks/` —— 推迟
+- `builtin/` —— 推迟
+- `cli/` 完整 CLI 框架 —— V1 可直接运行 tsx
 
 ## Core Concepts
 
@@ -68,32 +81,34 @@ A classroom seat is the visual and state representation of a runner instance.
 type SeatState =
   | "idle"
   | "queued"
-  | "reading"
-  | "coding"
-  | "testing"
-  | "reviewing"
-  | "checking"
-  | "waiting_user"
-  | "blocked"
+  | "running"    // V1 粗粒度状态（黑盒进程运行中）
   | "done"
   | "failed"
   | "stopped";
+
+// V1 之后深度集成时可能恢复的细粒度状态（当前推迟）：
+// | "reading" | "coding" | "testing" | "reviewing" | "checking" | "waiting_user" | "blocked"
 
 type SeatView = {
   id: string;
   runnerType: RunnerType;
   name: string;
   state: SeatState;
-  stateText: string;
-  currentTask?: string;
-  currentAgent?: RegistryRef;
-  currentSkill?: RegistryRef;
+  stateText: string;             // 当前活动描述（从 transcript tail 提取）
+  currentTask?: string;          // 当前 assignment 指令
+  currentAgent?: RegistryRef;    // V1 推迟（无 registry）
+  currentSkill?: RegistryRef;    // V1 推迟（无 registry）
   currentAction?: string;
   changedFiles: number;
   runtimeMs: number;
-  needsUser: boolean;
+  needsUser: boolean;            // V1 为 false（无交互审批）
 };
 ```
+
+**V1 简化说明**：
+- `SeatState` 收敛为 6 态（idle/queued/running/done/failed/stopped），细粒度状态推迟
+- `currentAgent`/`currentSkill` 为空（registry 推迟）
+- `needsUser` 恒为 false（交互审批属于深度集成，V1 不做）
 
 ### Assignment
 
@@ -104,11 +119,11 @@ type Assignment = {
   id: string;
   sessionId: string;
   targetSeatId: string;
-  sourceSeatIds: string[];
-  instruction: string;
-  inferredIntent?: "write" | "review" | "check" | "compare" | "test" | "ask";
-  agent?: RegistryRef;
-  skill?: RegistryRef;
+  sourceSeatIds: string[];       // 用于 ContextPack 组装
+  instruction: string;            // 原文指令
+  inferredIntent?: "write" | "review" | "check" | "compare" | "test" | "ask"; // 保留但 V1 不实现推断
+  agent?: RegistryRef;            // V1 推迟（无 registry）
+  skill?: RegistryRef;            // V1 推迟（无 registry）
   contextPack: ContextPack;
   status: "queued" | "running" | "done" | "failed" | "stopped";
   createdAt: string;
@@ -116,6 +131,10 @@ type Assignment = {
   finishedAt?: string;
 };
 ```
+
+**V1 简化说明**：
+- `agent`/`skill` 为空（registry 推迟）
+- `inferredIntent` 字段保留但 V1 不填（推断逻辑推迟）
 
 ### Classroom Command
 
@@ -125,14 +144,19 @@ Commands should be UI-independent. TUI keys, slash commands, and future Web butt
 type ClassroomCommand =
   | { type: "select_seat"; seatId: string }
   | { type: "dispatch"; targetSeatId: string; instruction: string; sourceSeatIds: string[] }
-  | { type: "pause_seat"; seatId: string }
-  | { type: "resume_seat"; seatId: string }
   | { type: "stop_seat"; seatId: string }
-  | { type: "approve_gate"; gateId: string }
-  | { type: "reject_gate"; gateId: string }
-  | { type: "run_hook"; hookId: string; seatId?: string }
-  | { type: "start_flow"; flowId: string; task: string; roleAssignments: RoleAssignment[] };
+  | { type: "approve_gate"; gateId: string }  // V1 推迟（无交互审批）
+  | { type: "reject_gate"; gateId: string }   // V1 推迟（无交互审批）
+  // V1 推迟：
+  // | { type: "pause_seat"; seatId: string }
+  // | { type: "resume_seat"; seatId: string }
+  // | { type: "run_hook"; hookId: string; seatId?: string }
+  // | { type: "start_flow"; flowId: string; task: string; roleAssignments: RoleAssignment[] }
 ```
+
+**V1 简化说明**：
+- 保留 `select_seat` / `dispatch` / `stop_seat` / `approve_gate` / `reject_gate`（后两者接口保留但 V1 不实现）
+- `pause`/`resume`/`run_hook`/`start_flow` 推迟
 
 ### Classroom View
 
@@ -148,17 +172,21 @@ type ClassroomView = {
     startedAt: string;
     runtimeMs: number;
   };
-  blackboard: BlackboardView;
+  blackboard: BlackboardView;        // V1 最小版（只有会话标题）
   seats: SeatView[];
   selectedSeatId?: string;
   desk?: DeskView;
-  registryStats: {
+  registryStats: {                   // V1 推迟（无 registry）
     agents: number;
     skills: number;
     hooks: number;
   };
 };
 ```
+
+**V1 简化说明**：
+- `blackboard` 只显示会话标题和运行时间（阶段 3a 补完整版）
+- `registryStats` 全为 0（registry 推迟）
 
 ### Desk View
 
@@ -168,17 +196,25 @@ type DeskView = {
   title: string;
   currentTask?: string;
   currentAction?: string;
-  agent?: RegistryRef;
-  skill?: RegistryRef;
-  hooks: HookRunView[];
-  activities: ActivityView[];
+  agent?: RegistryRef;               // V1 推迟（无 registry）
+  skill?: RegistryRef;               // V1 推迟（无 registry）
+  hooks: HookRunView[];              // V1 推迟（无 hooks）
+  activities: ActivityView[];        // V1 简化为 transcript tail
   files: FileChangeView[];
-  approvals: ApprovalView[];
+  approvals: ApprovalView[];         // V1 推迟（无交互审批）
   artifacts: ArtifactRef[];
 };
 ```
 
-## Registry
+**V1 简化说明**：
+- `agent`/`skill` 为空
+- `hooks` 为空数组
+- `activities` 简化为 transcript 最近 N 行
+- `approvals` 为空数组
+
+## Registry（V1 推迟）
+
+> **2026-07-03 更新**：整个 Registry 系统（agents/skills/hooks/flows 的加载、合并、推断）推迟到 V1 之后。以下内容仅作架构参考。
 
 The registry merges agents, skills, hooks, and flows from multiple sources.
 
@@ -371,20 +407,26 @@ Every assignment receives a generated context pack.
 ```ts
 type ContextPack = {
   userInstruction: string;
-  blackboardSummary: string;
-  projectMemory?: string;
-  userMemory?: string;
-  selectedAgent?: RegistryRef;
-  selectedSkill?: RegistryRef;
-  sourceSeats: SourceSeatContext[];
+  blackboardSummary: string;         // V1 推迟（无 blackboard）
+  projectMemory?: string;            // V1 推迟（无 memory）
+  userMemory?: string;               // V1 推迟（无 memory）
+  selectedAgent?: RegistryRef;       // V1 推迟（无 registry）
+  selectedSkill?: RegistryRef;       // V1 推迟（无 registry）
+  sourceSeats: SourceSeatContext[];  // V1 核心：diff + summary
   artifacts: ArtifactRef[];
-  evidence: EvidenceRef[];
+  evidence: EvidenceRef[];           // V1 推迟（无 evidence 系统）
 };
 ```
 
-Source seat context includes summary, diff, changed files, artifacts, and evidence from referenced seats.
+**V1 简化说明**：
+- 核心字段 `userInstruction` + `sourceSeats`（包含 diff + summary）
+- `blackboardSummary`/`projectMemory`/`userMemory`/`selectedAgent`/`selectedSkill`/`evidence` 推迟
 
-### Blackboard
+Source seat context includes summary, diff, changed files, artifacts from referenced seats.
+
+### Blackboard（V1 推迟）
+
+> **2026-07-03 更新**：完整 Blackboard（facts/claims/openQuestions/decisions）推迟到阶段 3a。V1 只有会话标题显示。
 
 ```ts
 type Blackboard = {
@@ -410,7 +452,11 @@ type Claim = {
 };
 ```
 
-## Hook System
+**Claim verification（阶段 3a 功能）** 是 AgentRoom 的护城河特性，V1 不实现。
+
+## Hook System（V1 推迟）
+
+> **2026-07-03 更新**：整个 Hook 系统（shell/JS/Python/approval 四运行时）推迟到 V1 之后。
 
 Hook types supported in MVP:
 

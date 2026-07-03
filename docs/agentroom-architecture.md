@@ -1,25 +1,25 @@
-# AgentRoom Architecture
+# AgentRoom 架构
 
 > **2026-07-03 更新**：本文档已按批准设计（design/agentroom-design-approved.md）调整。V1 = 黑盒无头进程 + 多工具同屏教室 TUI。Registry/hooks/flow/memory 推迟到 V1 之后。
 
-## Technical Stack
+## 技术栈
 
-V1 stack:
+V1 技术栈：
 
-- Language: TypeScript
-- Runtime: Node.js
-- TUI: Ink + React
-- Process execution: Node `child_process` or `execa`（黑盒无头进程，管道读输出）
-- Config: 最小化（V1 只需三家 CLI 路径探测）
-- Storage: filesystem + JSONL
-- Database: none
+- 语言：TypeScript
+- 运行时：Node.js
+- TUI：Ink + React
+- 进程执行：Node `child_process` 或 `execa`（黑盒无头进程，管道读输出）
+- 配置：最小化（V1 只需三家 CLI 路径探测）
+- 存储：filesystem + JSONL
+- 数据库：无
 
 **推迟到 V1 之后**：
-- CLI parser (commander/clipanion) —— V1 可直接 `tsx src/...`
-- YAML config —— V1 配置最小化
-- Registry system —— agents/skills/hooks/flows 全部推迟
+- CLI 解析器（commander/clipanion）—— V1 可直接 `tsx src/...`
+- YAML 配置 —— V1 配置最小化
+- Registry 系统 —— agents/skills/hooks/flows 全部推迟
 
-## Top-Level Modules（V1 精简）
+## 顶层模块（V1 精简）
 
 ```text
 src/
@@ -46,19 +46,19 @@ src/
 - `builtin/` —— 推迟
 - `cli/` 完整 CLI 框架 —— V1 可直接运行 tsx
 
-## Core Concepts
+## 核心概念
 
-### Runner Type
+### Runner 类型
 
-A supported tool type:
+支持的工具类型：
 
 ```ts
 type RunnerType = "codex" | "claude" | "gemini";
 ```
 
-### Runner Instance
+### Runner 实例
 
-One running or configured CLI instance.
+一个正在运行或已配置的 CLI 实例。
 
 ```ts
 type RunnerInstance = {
@@ -73,9 +73,9 @@ type RunnerInstance = {
 };
 ```
 
-### Seat
+### 座位
 
-A classroom seat is the visual and state representation of a runner instance.
+教室座位是 runner 实例的可视化与状态表示。
 
 ```ts
 type SeatState =
@@ -112,7 +112,7 @@ type SeatView = {
 
 ### Assignment
 
-An instruction given to one seat.
+分配给某个座位的指令。
 
 ```ts
 type Assignment = {
@@ -136,9 +136,9 @@ type Assignment = {
 - `agent`/`skill` 为空（registry 推迟）
 - `inferredIntent` 字段保留但 V1 不填（推断逻辑推迟）
 
-### Classroom Command
+### 教室命令
 
-Commands should be UI-independent. TUI keys, slash commands, and future Web buttons all map to these commands.
+命令应与 UI 无关。TUI 按键、slash commands 和未来的 Web 按钮都映射到这些命令。
 
 ```ts
 type ClassroomCommand =
@@ -158,9 +158,9 @@ type ClassroomCommand =
 - 保留 `select_seat` / `dispatch` / `stop_seat` / `approve_gate` / `reject_gate`（后两者接口保留但 V1 不实现）
 - `pause`/`resume`/`run_hook`/`start_flow` 推迟
 
-### Classroom View
+### 教室视图
 
-The TUI and future frontend should render from this object.
+TUI 和未来前端都应基于这个对象渲染。
 
 ```ts
 type ClassroomView = {
@@ -188,7 +188,7 @@ type ClassroomView = {
 - `blackboard` 只显示会话标题和运行时间（阶段 3a 补完整版）
 - `registryStats` 全为 0（registry 推迟）
 
-### Desk View
+### Desk 视图
 
 ```ts
 type DeskView = {
@@ -216,9 +216,9 @@ type DeskView = {
 
 > **2026-07-03 更新**：整个 Registry 系统（agents/skills/hooks/flows 的加载、合并、推断）推迟到 V1 之后。以下内容仅作架构参考。
 
-The registry merges agents, skills, hooks, and flows from multiple sources.
+Registry 会合并来自多个来源的 agents、skills、hooks 和 flows。
 
-Sources:
+来源：
 
 ```text
 builtin
@@ -227,7 +227,7 @@ builtin
 runner configs: codex, claude, gemini
 ```
 
-Priority:
+优先级：
 
 ```text
 project > global > runner > builtin
@@ -329,9 +329,9 @@ type RoleAssignment = {
 };
 ```
 
-## Local File Layout
+## 本地文件布局
 
-Project-local files:
+项目本地文件：
 
 ```text
 .agentroom/
@@ -368,7 +368,7 @@ Project-local files:
         claims.jsonl
 ```
 
-Global files:
+全局文件：
 
 ```text
 ~/.agentroom/
@@ -381,9 +381,9 @@ Global files:
     user.md
 ```
 
-## Event Log
+## 事件日志
 
-Events are stored in `events.jsonl`.
+事件存储在 `events.jsonl` 中。
 
 ```ts
 type AgentRoomEvent =
@@ -398,11 +398,11 @@ type AgentRoomEvent =
   | { type: "assignment.failed"; assignmentId: string; seatId: string; error: string; ts: string };
 ```
 
-## Context and Memory
+## 上下文与记忆
 
 ### Context Pack
 
-Every assignment receives a generated context pack.
+每个 assignment 都会收到一个生成的 context pack。
 
 ```ts
 type ContextPack = {
@@ -422,7 +422,7 @@ type ContextPack = {
 - 核心字段 `userInstruction` + `sourceSeats`（包含 diff + summary）
 - `blackboardSummary`/`projectMemory`/`userMemory`/`selectedAgent`/`selectedSkill`/`evidence` 推迟
 
-Source seat context includes summary, diff, changed files, artifacts from referenced seats.
+来源座位上下文包含被引用座位的 summary、diff、变更文件和 artifacts。
 
 ### Blackboard（V1 推迟）
 
@@ -440,7 +440,7 @@ type Blackboard = {
 };
 ```
 
-Important claims should include evidence:
+重要 claims 应包含 evidence：
 
 ```ts
 type Claim = {
@@ -454,18 +454,18 @@ type Claim = {
 
 **Claim verification（阶段 3a 功能）** 是 AgentRoom 的护城河特性，V1 不实现。
 
-## Hook System（V1 推迟）
+## Hook 系统（V1 推迟）
 
 > **2026-07-03 更新**：整个 Hook 系统（shell/JS/Python/approval 四运行时）推迟到 V1 之后。
 
-Hook types supported in MVP:
+MVP 支持的 Hook 类型：
 
 - shell
 - js
 - python
 - approval
 
-JS and Python hooks can return blackboard updates and memory candidates. Shell hooks cannot directly modify memory or blackboard.
+JS 和 Python hooks 可以返回 blackboard updates 和 memory candidates。Shell hooks 不能直接修改 memory 或 blackboard。
 
 ### Hook Context
 
@@ -501,13 +501,13 @@ type HookResult = {
 };
 ```
 
-### Python Hook Protocol
+### Python Hook 协议
 
-Python hooks receive `HookContext` on stdin and return `HookResult` on stdout as JSON.
+Python hooks 从 stdin 接收 `HookContext`，并通过 stdout 返回 JSON 格式的 `HookResult`。
 
-### JS Hook Protocol
+### JS Hook 协议
 
-JS hooks export a default async function:
+JS hooks 导出一个默认 async 函数：
 
 ```js
 export default async function hook(ctx) {
@@ -515,16 +515,16 @@ export default async function hook(ctx) {
 }
 ```
 
-## Runner Adapters
+## Runner 适配器
 
-Runner adapters are responsible for:
+Runner 适配器负责：
 
-- probing local installation
-- starting assignments
-- capturing stdout/stderr
-- saving transcripts
-- updating seat state
-- collecting artifacts after execution
+- 探测本地安装。
+- 启动 assignments。
+- 捕获 stdout/stderr。
+- 保存 transcripts。
+- 更新座位状态。
+- 执行结束后收集 artifacts。
 
 ```ts
 interface RunnerAdapter {
@@ -536,20 +536,20 @@ interface RunnerAdapter {
 }
 ```
 
-MVP can treat each runner as a black-box CLI process. Deep structured integrations can come later.
+MVP 可以把每个 runner 当作黑盒 CLI 进程处理。更深的结构化集成可以稍后再做。
 
-## Workspace Strategy
+## 工作区策略
 
-Assignment workspace mode:
+Assignment 工作区模式：
 
-- `ask`, `review`, `check`, `compare`: shared workspace.
-- `write`, `test` with file edits: isolated git worktree when another write assignment is active.
+- `ask`、`review`、`check`、`compare`：共享工作区。
+- 带文件编辑的 `write`、`test`：当另一个写入 assignment 活跃时使用隔离 git worktree。
 
-Worktree creation and cleanup should be explicit and visible in hooks/events.
+Worktree 创建与清理应是显式的，并在 hooks/events 中可见。
 
-## Future Web API Shape
+## 未来 Web API 形态
 
-MVP does not need a Web server, but the core should preserve these boundaries:
+MVP 不需要 Web 服务器，但核心应保留这些边界：
 
 ```text
 GET /api/classroom      -> ClassroomView

@@ -1,27 +1,27 @@
-# AgentRoom MVP Plan
+# AgentRoom MVP 计划
 
 > **2026-07-03 更新**：本文档已按批准设计（design/agentroom-design-approved.md）重排。V1 = 走廊（黑盒无头进程）+ 多工具同屏教室 TUI。hooks/registry/flow/memory 推迟到 V1 之后。
 
-## V1 Goal（重新定义，2026-07-03）
+## V1 目标（重新定义，2026-07-03）
 
-Build a local TypeScript CLI/TUI prototype that can:
+构建一个本地 TypeScript CLI/TUI 原型，能够：
 
 1. **走廊（阶段 1）**：黑盒无头进程驱动单个 CLI 座位，worktree 隔离执行，产出 diff + summary。
 2. **教室（阶段 2）**：Ink TUI 同屏显示 ≥2 个座位（至少两家不同工具），接受 `@seat` 派发，座位间可交接 context pack（diff + summary）。
-3. Store all session state in local files, no database.
-4. Native Windows support (no tmux/WSL dependency).
+3. 将所有会话状态存储在本地文件中，不使用数据库。
+4. 原生支持 Windows（不依赖 tmux/WSL）。
 
-## V1 Non-Goals（按批准设计更新）
+## V1 非目标（按批准设计更新）
 
-- No Web UI.
-- No database.
-- **No registry system** (agents/skills 推迟，V1 不做 agent/skill 自动推断).
-- **No hooks system** (shell/JS/Python/approval 四运行时全部推迟).
-- **No flow mode** (role-to-seat 宏推迟).
-- **No memory approval queue** (blackboard 最小版归阶段 3a，memory 审批推迟).
-- **No claim verification / referee system** (阶段 3a/3b，V1 之后的护城河).
-- No plugin marketplace.
-- No automatic multi-agent merge.
+- 不做 Web UI。
+- 不使用数据库。
+- **不做 registry 系统**（agents/skills 推迟，V1 不做 agent/skill 自动推断）。
+- **不做 hooks 系统**（shell/JS/Python/approval 四运行时全部推迟）。
+- **不做 flow 模式**（role-to-seat 宏推迟）。
+- **不做 memory 审批队列**（blackboard 最小版归阶段 3a，memory 审批推迟）。
+- **不做 claim verification / 裁判系统**（阶段 3a/3b，V1 之后的护城河）。
+- 不做插件市场。
+- 不做自动多 agent 合并。
 
 ## V1 Milestones（重排，2026-07-03）
 
@@ -31,91 +31,91 @@ Build a local TypeScript CLI/TUI prototype that can:
 
 #### M1-简化：最小脚手架
 
-Deliverables:
+交付物：
 - `package.json` + `tsconfig.json`
 - `src/probe.ts`（三家 CLI 无头模式实验）
 - `src/corridor.ts`（单座位派发 → worktree 执行 → 回收）
 - `src/types.ts`（Assignment / ContextPack / 事件子集）
 
-Acceptance:
+验收：
 - `tsx src/probe.ts` 在 Windows 原生成功驱动三家 CLI 无头模式，落盘原始输出
 - 确认各家权限旗标、退出码语义、是否有结构化输出（如 `claude -p --output-format stream-json`）
 
-#### M2-合并到M1：探测即 probe.ts 的一部分
+#### M2-合并到 M1：探测即 probe.ts 的一部分
 
-#### M3-推迟：Registry Loading（agents/skills/hooks/flows 全部推迟）
+#### M3-推迟：Registry 加载（agents/skills/hooks/flows 全部推迟）
 
 #### M4-精简：会话文件存储（只做走廊需要的部分）
 
-Deliverables:
+交付物：
 - `.agentroom/sessions/sess_*/` 目录结构
 - `events.jsonl` 写入/读取
 - `seats/<seat>/{state.json, patch.diff, summary.md}` 子集
 
-Acceptance:
+验收：
 - `tsx src/corridor.ts "fix X"` 产出 `.agentroom/sessions/<id>/seats/<seat>/{patch.diff, summary.md}` + `events.jsonl`
 - 超时、脏 worktree 两条失败路径可演示
 
-#### M7-前置：Runner Execution（黑盒无头进程）
+#### M7-前置：Runner 执行（黑盒无头进程）
 
-Deliverables:
+交付物：
 - `src/adapters/runner.ts`（通用子进程管理：spawn、管道读输出、超时 kill）
 - 三家 CLI 的启动命令模板（probe 后确认）
 - 座位状态机简化版：`queued -> running -> done/failed`
 
-Acceptance:
+验收：
 - 单次派发能启动、捕获 stdout/stderr、记录退出码
 - 进程超时能正常 kill
 
-#### M8-前置：Artifact Collection
+#### M8-前置：产物收集
 
-Deliverables:
+交付物：
 - 派发结束后执行 `git diff` / `git diff --stat` 到 `patch.diff`
 - 从 worktree 根收集 `AGENTROOM_SUMMARY.md` → 座位 `summary.md`
 - 确定性兜底摘要器（diffstat + 文件清单 + 退出码 + 可选的结构化输出事件）
 
-Acceptance:
+验收：
 - 第二座位派发时，ContextPack 包含第一座位的 diff + summary
 - 第二座位输出实际引用了第一座位 diff 的具体内容
 
 ### 阶段 2：教室（M5 + M6 部分 + M12 部分）
 
-**目标**：多工具同屏的单 CLI 教室 TUI 跑起来（product-spec Main Screen）。
+**目标**：多工具同屏的单 CLI 教室 TUI 跑起来（product-spec 主界面）。
 
-#### M5：TUI Classroom View
+#### M5：TUI 教室视图
 
-Deliverables:
+交付物：
 - `src/tui/App.tsx`（Ink + React）
 - Blackboard header（会话标题 + 运行时间）
-- Seat row（≥2 座位卡片，显示 runner type / 状态 / 当前任务）
-- Desk panel（选中座位的详情：活动日志 tail、变更文件、当前 summary）
-- Keyboard navigation（left/right 切换座位）
+- 座位行（≥2 座位卡片，显示 runner type / 状态 / 当前任务）
+- Desk 面板（选中座位的详情：活动日志 tail、变更文件、当前 summary）
+- 键盘导航（left/right 切换座位）
 
-Acceptance:
+验收：
 - TUI 启动，同屏显示 ≥2 座位（至少两家不同工具：如 Codex #1、Claude #1）
 - 实时 tail `events.jsonl` 更新座位状态
 - 座位颜色按 runner type 区分
 
 #### M6-部分：自然语言派发（只做解析，不做推断）
 
-Deliverables:
+交付物：
 - 解析 `@seat` 目标
 - 解析 `@seat` 来源引用（用于 ContextPack）
 - 保留原文指令
 - **不做** agent/skill 自动推断（推迟）
 
-Acceptance:
+验收：
 - 输入 `@codex#1 修复 bug` → 创建 Assignment（target: codex#1, instruction: "修复 bug"）
 - 输入 `@claude#1 审查 @codex#1` → 创建 Assignment（target: claude#1, sources: [codex#1], instruction: "审查 @codex#1"）
 
 #### M12-部分：基础控制
 
-Deliverables:
+交付物：
 - Stop seat 命令（kill 进程、标记 `stopped`）
 - Worktree 清理命令（手动触发，V1 不自动）
 - 失败座位状态可检视（transcript log、error message）
 
-Acceptance:
+验收：
 - TUI 中可 stop 正在运行的座位
 - 失败座位的 desk 面板显示错误信息
 
@@ -133,14 +133,14 @@ Acceptance:
 
 以下功能在批准设计中明确推迟，不进 V1：
 
-- **M3 Registry Loading**（agents/skills/hooks/flows 全量，含 builtin 与三家工具导入）→ 阶段 3 之后评估
-- **M9 Hook Runtime**（shell/JS/Python/approval 四运行时）→ 阶段 3 之后评估
-- **M10 Blackboard & Memory**（blackboard 最小版归阶段 3a；memory 审批队列推迟）→ 阶段 3 之后评估
-- **M11 Flow Mode**（role-to-seat 宏）→ 阶段 3 之后评估
+- **M3 Registry 加载**（agents/skills/hooks/flows 全量，含 builtin 与三家工具导入）→ 阶段 3 之后评估
+- **M9 Hook 运行时**（shell/JS/Python/approval 四运行时）→ 阶段 3 之后评估
+- **M10 Blackboard 与 Memory**（blackboard 最小版归阶段 3a；memory 审批队列推迟）→ 阶段 3 之后评估
+- **M11 Flow 模式**（role-to-seat 宏）→ 阶段 3 之后评估
 - **M12 部分**（worktree 自动清理策略、会话导出）→ 阶段 3 之后评估
 - **配色体系完整版**（四色分类法）→ V1 只按 runner type 区分颜色
 
-## V1 First Demo Scenario（更新，2026-07-03）
+## V1 首个演示场景（更新，2026-07-03）
 
 启动 AgentRoom TUI：
 
@@ -151,21 +151,21 @@ tsx src/tui/App.tsx
 TUI 显示两个座位：
 ```
 ┌─ AgentRoom ─ Session abc123 ─ 00:00:15 ───────────────┐
-│ Blackboard: 2 seats active                             │
+│ 黑板: 2 个座位活跃中                                     │
 └────────────────────────────────────────────────────────┘
 
 ┌─ Codex #1 ───────┐  ┌─ Claude #1 ──────┐
-│ Status: running   │  │ Status: idle      │
-│ Task: 修复 bug     │  │ Task: —           │
+│ 状态: running      │  │ 状态: idle         │
+│ 任务: 修复 bug      │  │ 任务: —            │
 └───────────────────┘  └───────────────────┘
 
 ┌─ Desk: Codex #1 ─────────────────────────────────────┐
-│ Activity:                                             │
-│ [12:30:15] Assignment queued                          │
-│ [12:30:16] Runner started (codex exec)                │
-│ [12:30:45] Writing src/auth/session.ts...             │
+│ 活动:                                                  │
+│ [12:30:15] Assignment 已入队                           │
+│ [12:30:16] Runner 已启动 (codex exec)                  │
+│ [12:30:45] 正在写入 src/auth/session.ts...             │
 │                                                       │
-│ Changed files: (none yet)                             │
+│ 变更文件: (暂无)                                       │
 └───────────────────────────────────────────────────────┘
 ```
 

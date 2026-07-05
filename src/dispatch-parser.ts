@@ -7,6 +7,7 @@ export type ParsedDispatch = {
 };
 
 const seatRefPattern = /@(codex|claude|gemini)#(\d+)/gi;
+const leadingSeatRefPattern = /^@(codex|claude|gemini)#(\d+)\b/i;
 
 export function parseDispatch(input: string): ParsedDispatch {
   const refs = [...input.matchAll(seatRefPattern)];
@@ -30,6 +31,28 @@ export function parseDispatch(input: string): ParsedDispatch {
     sourceSeatIds,
     instruction,
   };
+}
+
+export function parseDispatchWithDefaultTarget(input: string, defaultTargetSeatId: string | undefined): ParsedDispatch {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error("请输入任务说明。");
+  }
+  if (leadingSeatRefPattern.test(trimmed) || !defaultTargetSeatId) {
+    return parseDispatch(trimmed);
+  }
+
+  return {
+    targetSeatId: defaultTargetSeatId,
+    sourceSeatIds: extractSeatReferences(trimmed).filter((seatId) => seatId !== defaultTargetSeatId),
+    instruction: trimmed,
+  };
+}
+
+function extractSeatReferences(input: string): string[] {
+  return [...input.matchAll(seatRefPattern)]
+    .map((match) => toSeatId(match[1] as RunnerType, match[2]))
+    .filter((seatId, index, all) => all.indexOf(seatId) === index);
 }
 
 export function toSeatId(type: RunnerType, index: string | number): string {

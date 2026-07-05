@@ -1,5 +1,5 @@
 import { ProcessRunnerAdapter, type RunnerCommand } from "./runner.js";
-import type { RunnerType } from "../types.js";
+import type { AgentControlMode, RunnerType } from "../types.js";
 
 export class ClaudeAdapter extends ProcessRunnerAdapter {
   type: RunnerType = "claude";
@@ -9,10 +9,17 @@ export class ClaudeAdapter extends ProcessRunnerAdapter {
     return { command: process.env.AGENTROOM_CLAUDE_BIN ?? defaultClaudeCommand(), args: ["--version"] };
   }
 
-  promptCommand(prompt: string): RunnerCommand {
+  promptCommand(prompt: string, controlMode: AgentControlMode = "accept"): RunnerCommand {
+    if (process.env.AGENTROOM_CLAUDE_TRANSPORT === "terminal") {
+      return {
+        command: process.env.AGENTROOM_CLAUDE_BIN ?? defaultClaudeCommand(),
+        args: ["--permission-mode", "default", prompt],
+        terminal: true,
+      };
+    }
     return {
       command: process.env.AGENTROOM_CLAUDE_BIN ?? defaultClaudeCommand(),
-      args: ["-p", "--output-format", "stream-json", "--verbose"],
+      args: claudePrintArgs(controlMode),
       stdin: prompt,
     };
   }
@@ -24,6 +31,16 @@ export class ClaudeAdapter extends ProcessRunnerAdapter {
 
 function defaultClaudeCommand(): string {
   return process.platform === "win32" ? "claude.cmd" : "claude";
+}
+
+function claudePrintArgs(controlMode: AgentControlMode): string[] {
+  const permissionMode =
+    controlMode === "plan"
+      ? "plan"
+      : controlMode === "full"
+        ? "bypassPermissions"
+        : "acceptEdits";
+  return ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", permissionMode];
 }
 
 function createClaudeStreamParser(): (chunk: string) => string[] {
@@ -82,31 +99,16 @@ function formatContentBlock(block: unknown): string[] {
     case "text":
       return splitLines(String(block.text ?? "")).map((line) => `Claude: ${line}`);
     case "thinking":
-      return splitLines(String(block.thinking ?? "")).map((line) => `#thinking ${line}`);
+      return [];
     case "tool_use": {
       const name = typeof block.name === "string" ? block.name : "tool";
-      return [`#tool ${name} ${summarizeInput(block.input)}`.trimEnd()];
+      return [`#meta Claude is using ${name}`];
     }
     case "tool_result":
-      return formatToolResult(block);
+      return [];
     default:
       return [];
   }
-}
-
-function formatToolResult(block: Record<string, unknown>): string[] {
-  const content = block.content;
-  const lines: string[] = [];
-  if (typeof content === "string") {
-    lines.push(...splitLines(content));
-  } else if (Array.isArray(content)) {
-    for (const item of content) {
-      if (isRecord(item) && item.type === "text") {
-        lines.push(...splitLines(String(item.text ?? "")));
-      }
-    }
-  }
-  return lines.slice(0, 5).map((line) => `#result ${line}`);
 }
 
 function formatResultEvent(payload: Record<string, unknown>): string[] {
@@ -119,16 +121,6 @@ function formatResultEvent(payload: Record<string, unknown>): string[] {
   const stats = [duration, cost].filter(Boolean).join(" ");
   if (stats) parts.push(`#meta Claude ${stats}`);
   return parts;
-}
-
-function summarizeInput(input: unknown): string {
-  if (input === undefined || input === null) return "";
-  try {
-    const compact = typeof input === "string" ? input : JSON.stringify(input);
-    return compact.length > 120 ? `${compact.slice(0, 117)}...` : compact;
-  } catch {
-    return "";
-  }
 }
 
 function splitLines(value: string): string[] {

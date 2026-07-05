@@ -53,6 +53,12 @@ function renderLine(line: string, key: string): React.ReactElement {
   if (line.startsWith("#tool-result ")) {
     return <Text key={key} color={tuiTheme.input} dimColor>{`  ${line.slice(13)}`}</Text>;
   }
+  if (line.startsWith("#approval ")) {
+    return <Text key={key} color={tuiTheme.warning}>{line.slice(10)}</Text>;
+  }
+  if (line.startsWith("#terminal ")) {
+    return <Text key={key} color={tuiTheme.text}>{line.slice(10)}</Text>;
+  }
   if (line.startsWith("#system ")) {
     return <Text key={key} color={tuiTheme.system}>{line.slice(8)}</Text>;
   }

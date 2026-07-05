@@ -2,7 +2,7 @@ export type RunnerType = "codex" | "claude" | "gemini";
 
 export type AgentControlMode = "plan" | "accept" | "full";
 
-export type SeatState = "idle" | "queued" | "running" | "done" | "failed" | "stopped";
+export type SeatState = "idle" | "queued" | "running" | "waiting_user" | "done" | "failed" | "stopped";
 
 export type RunnerProbe = {
   type: RunnerType;
@@ -45,7 +45,7 @@ export type SeatView = {
   finishedAt?: string;
   changedFiles: number;
   runtimeMs: number;
-  needsUser: false;
+  needsUser: boolean;
 };
 
 export type ActivityView = {
@@ -146,6 +146,7 @@ export type SeatStateFile = {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  needsUser?: boolean;
   updatedAt: string;
 };
 

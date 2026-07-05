@@ -47,6 +47,9 @@ Usage:
   agentroom tui
   agentroom recover [sessionId]
 
+Workspace:
+  AgentRoom uses the directory where you start the command as the workspace.
+
 Examples:
   agentroom probe
   agentroom run --runner codex --allow-dirty "update README"

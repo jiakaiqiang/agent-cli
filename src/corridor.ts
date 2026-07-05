@@ -32,6 +32,10 @@ export async function runCorridor(args = process.argv.slice(2)): Promise<void> {
   console.log(`Session: ${session.id}`);
   console.log(`Seat path: ${result.seatPath}`);
   console.log(`Worktree path: ${result.worktreePath}`);
+  if (result.status !== "done") {
+    console.error(result.error ?? `Assignment ${result.status}.`);
+    process.exitCode = 1;
+  }
 }
 
 export function parseCorridorArgs(args: string[]): CorridorOptions {

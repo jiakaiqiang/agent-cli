@@ -13,7 +13,7 @@ import {
   writeSeatState,
   writeSummary,
 } from "./storage.js";
-import type { AgentControlMode, AgentRoomEvent, Assignment, RunnerType } from "./types.js";
+import type { AgentControlMode, AgentRoomEvent, Assignment, RunnerType, SeatState } from "./types.js";
 
 type GitCapture = {
   stdout: string;
@@ -44,6 +44,8 @@ export type RunSeatAssignmentResult = {
   assignment: Assignment;
   seatPath: string;
   worktreePath: string;
+  status: Extract<SeatState, "done" | "failed" | "stopped">;
+  error?: string;
 };
 
 export async function runSeatAssignment(options: RunSeatAssignmentOptions): Promise<RunSeatAssignmentResult> {
@@ -52,6 +54,8 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
   const fallbackWorktreePath = path.join(worktreesDir(options.projectRoot), options.sessionId, `${options.seatId}-${Date.now()}`);
   let assignment: Assignment | undefined;
   let workspacePath = options.projectRoot;
+  let finalStatus: RunSeatAssignmentResult["status"] = "done";
+  let finalError: string | undefined;
 
   await createSeat(
     options.sessionId,
@@ -122,7 +126,16 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
       projectRoot: options.projectRoot,
       cwd: workspace.cwd,
       timeoutMs: options.timeoutMs ?? 10 * 60_000,
+      skipGitRepoCheck: workspace.mode === "shared",
     })) {
+      if (event.type === "assignment.failed") {
+        finalStatus = "failed";
+        finalError = event.error;
+      } else if (event.type === "seat.state_changed" && event.state === "stopped") {
+        finalStatus = "stopped";
+      } else if (event.type === "assignment.completed") {
+        finalStatus = "done";
+      }
       await options.onEvent?.(event);
     }
 
@@ -160,6 +173,8 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
     assignment: assignment!,
     seatPath: seatPaths(options.sessionId, options.seatId, options.projectRoot).root,
     worktreePath: workspacePath,
+    status: finalStatus,
+    error: finalError,
   };
 }
 

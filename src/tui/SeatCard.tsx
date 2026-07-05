@@ -33,7 +33,9 @@ export function SeatCard({ seat, selected }: { seat: SeatView; selected: boolean
         <Text key={`task-${index}`} color={tuiTheme.text}>{index === 0 ? `  ${line}` : `  ${line}`}</Text>
       ))}
       <Box justifyContent="space-between">
-        <Text color={tuiTheme.dim}>mode {formatControlMode(seat.controlMode)}</Text>
+        <Text color={seat.needsUser ? tuiTheme.warning : tuiTheme.dim}>
+          {seat.needsUser ? "needs user" : `mode ${formatControlMode(seat.controlMode)}`}
+        </Text>
         <Text color={tuiTheme.dim}>{formatDuration(seat.runtimeMs)}</Text>
       </Box>
       <Text color={selected ? tuiTheme.text : tuiTheme.dim} wrap="truncate-end">now  {action}</Text>
@@ -49,6 +51,8 @@ function formatSeatState(state: SeatView["state"]): string {
       return "queued";
     case "running":
       return "running";
+    case "waiting_user":
+      return "waiting";
     case "done":
       return "done";
     case "failed":
@@ -63,10 +67,11 @@ function stateColor(state: SeatView["state"]): string {
     case "running":
     case "done":
       return tuiTheme.accent;
+    case "queued":
+    case "waiting_user":
+      return tuiTheme.warning;
     case "failed":
       return tuiTheme.error;
-    case "queued":
-      return tuiTheme.warning;
     default:
       return tuiTheme.dim;
   }

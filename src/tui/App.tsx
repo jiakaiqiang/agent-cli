@@ -3,7 +3,7 @@ import { Box, render, Text, useApp, useInput, useStdin } from "ink";
 import { pathToFileURL } from "node:url";
 import { runSeatAssignment } from "../assignment.js";
 import { adapterFor } from "../adapters/index.js";
-import { parseDispatch, runnerTypeFromSeatId, seatIdToDisplayName } from "../dispatch-parser.js";
+import { parseDispatchWithDefaultTarget, runnerTypeFromSeatId, seatIdToDisplayName } from "../dispatch-parser.js";
 import { recoverSession } from "../recovery.js";
 import {
   appendEvent,
@@ -66,15 +66,26 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
     let active = true;
     const initialize = async () => {
       const projectRoot = process.cwd();
-      const nextSessionId = await ensureSessionId(projectRoot);
+      const session = await createSession({ title: "TUI classroom", projectPath: projectRoot }, projectRoot);
+      const nextSessionId = session.id;
+      sessionIdRef.current = nextSessionId;
       if (active) {
         syncSessionId(nextSessionId);
         setSeats([]);
         setSelected(0);
         setMode("tool-select");
+        setDeskLines([
+          `Started fresh session ${nextSessionId}.`,
+          `Workspace: ${projectRoot}`,
+          "Press r from tool selection to restore the saved or previous agent list.",
+        ]);
       }
     };
-    void initialize();
+    void initialize().catch((error: unknown) => {
+      if (!active) return;
+      setDeskLines([`Startup failed: ${error instanceof Error ? error.message : String(error)}`]);
+      setMode("tool-select");
+    });
     return () => {
       active = false;
     };
@@ -125,7 +136,10 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
   useEffect(() => {
     const loadDesk = async () => {
       if (mode === "loading") {
-        setDeskLines(["Starting a new AgentRoom session..."]);
+        setDeskLines([
+          "Starting a new AgentRoom session...",
+          `Workspace: ${process.cwd()}`,
+        ]);
         return;
       }
       if (mode === "tool-select") {
@@ -133,23 +147,28 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
         const meta = runnerTheme[runner];
         setDeskLines([
           "#meta Tool palette",
+          `#meta Workspace: ${process.cwd()}`,
           `Selected: ${meta.label} (${meta.command})`,
           `Next seat: ${nextSeatId(runner, seats)}`,
           `Best for: ${meta.bestFor}`,
           "",
           "Use Left/Right, Up/Down, or 1/2/3 to choose a runner.",
           "Press Enter to create the agent instance.",
-          ...(seats.length > 0 ? ["Press Esc, Alt+S, b, or Backspace to return to the classroom."] : ["Press Esc to exit AgentRoom."]),
+          "Press r to restore the saved or previous agent list.",
+          ...(seats.length > 0
+            ? ["Press b, Backspace, or Alt+S to return to the classroom.", "Press q or Ctrl+C to exit AgentRoom."]
+            : ["Press q or Ctrl+C to exit AgentRoom."]),
         ]);
         return;
       }
       if (!sessionId || !selectedSeat) {
         setDeskLines([
           "Agents: 0",
+          `Workspace: ${process.cwd()}`,
           "Press a or Alt+S to add an agent.",
           "Type /restore to pull the previous agent list into this new session.",
           "Type /help for classroom commands.",
-          "Press Esc to exit AgentRoom.",
+          "Press q or Ctrl+C to exit AgentRoom.",
         ]);
         return;
       }
@@ -166,7 +185,8 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
           "Press Alt+S or a to add another agent.",
           "Press d to delete the selected agent from this classroom.",
           "Type /restore to pull the previous agent list.",
-          "Press Esc to exit AgentRoom from this classroom level.",
+          "Press Esc to return to tool selection.",
+          "Press q or Ctrl+C to exit AgentRoom.",
         ]);
         return;
       }
@@ -174,7 +194,17 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
       setDeskLines(await buildSeatDetailLines(sessionId, selectedSeat.id, selectedSeat, process.cwd()));
     };
     loadDesk().catch(() => undefined);
-  }, [mode, seats.length, sessionId, selectedRunner, selectedSeat?.id]);
+  }, [
+    mode,
+    seats.length,
+    sessionId,
+    selectedRunner,
+    selectedSeat?.id,
+    selectedSeat?.state,
+    selectedSeat?.currentAction,
+    selectedSeat?.needsUser,
+    selectedSeat?.runtimeMs,
+  ]);
 
   useInput(
     (inputChar, key) => {
@@ -182,7 +212,18 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
         exit();
         return;
       }
+      if ((mode === "room" || mode === "tool-select") && inputChar?.toLowerCase() === "q" && !input) {
+        exit();
+        return;
+      }
       if (mode === "loading") return;
+      if (mode === "detail" && selectedSeat?.needsUser) {
+        const forwarded = approvalInputForKey(inputChar, key);
+        if (forwarded !== undefined) {
+          void forwardAgentInput(selectedSeat, forwarded);
+          return;
+        }
+      }
       if (key.meta && inputChar?.toLowerCase() === "s") {
         setInput("");
         setMode((current) => (current === "tool-select" && seats.length > 0 ? "room" : "tool-select"));
@@ -194,15 +235,19 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
           setMode("room");
           return;
         }
-        if (mode === "tool-select" && seats.length > 0) {
+        if (mode === "room") {
           setInput("");
-          setMode("room");
+          setMode("tool-select");
           return;
         }
-        exit();
+        setInput("");
         return;
       }
       if (mode === "tool-select") {
+        if (inputChar?.toLowerCase() === "r") {
+          void restoreAgentList();
+          return;
+        }
         if ((key.backspace || key.delete || inputChar?.toLowerCase() === "b") && seats.length > 0) {
           setMode("room");
           return;
@@ -263,10 +308,7 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
           return;
         }
         try {
-          const parsed =
-            mode === "detail" && selectedSeat && !hasSeatReference(input)
-              ? { targetSeatId: selectedSeat.id, sourceSeatIds: [], instruction: input.trim() }
-              : parseDispatch(input);
+          const parsed = parseDispatchWithDefaultTarget(input, selectedSeat?.id);
           focusSeatDetail(parsed.targetSeatId);
           void dispatchFromInput(parsed);
         } catch (error) {
@@ -288,7 +330,9 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
         return;
       }
       if (mode === "room" && inputChar?.toLowerCase() === "d" && !input && selectedSeat) {
-        void deleteAgentSeat(selectedSeat);
+        void deleteAgentSeat(selectedSeat).then((nextSeats) => {
+          setMode(nextSeats.length > 0 ? "room" : "tool-select");
+        });
         return;
       }
       if (inputChar) setInput((value) => `${value}${inputChar}`);
@@ -321,10 +365,12 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
       setSeats(nextSeats);
       setSelected(nextSelected >= 0 ? nextSelected : 0);
       setInput("");
+      setMode("room");
       setDeskLines([
         `Created ${seatId}.`,
-        "Press Enter to create another agent with the selected tool.",
-        "Press Esc, Alt+S, b, or Backspace to return to the classroom.",
+        `Workspace: ${projectRoot}`,
+        "Press Enter to open this agent.",
+        "Press Esc to return to tool selection.",
       ]);
     } catch (error) {
       setDeskLines([`Create agent failed: ${error instanceof Error ? error.message : String(error)}`]);
@@ -334,6 +380,23 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
   async function dispatchFromInput(parsed: { targetSeatId: string; sourceSeatIds: string[]; instruction: string }): Promise<void> {
     const projectRoot = process.cwd();
     const targetSeat = seats.find((seat) => seat.id === parsed.targetSeatId);
+    if (!targetSeat) {
+      setDeskLines([
+        `Agent not found: ${parsed.targetSeatId}`,
+        "Create the agent first from the tool selection view, then dispatch to it.",
+      ]);
+      setMode(seats.length > 0 ? "room" : "tool-select");
+      return;
+    }
+    const missingSourceSeatIds = parsed.sourceSeatIds.filter((seatId) => !seats.some((seat) => seat.id === seatId));
+    if (missingSourceSeatIds.length > 0) {
+      focusSeatDetail(parsed.targetSeatId);
+      setDeskLines([
+        `Source agent not found: ${missingSourceSeatIds.join(", ")}`,
+        "Referenced source agents must be visible in this workspace session.",
+      ]);
+      return;
+    }
     const nextSessionId = await ensureSessionId(projectRoot);
     syncSessionId(nextSessionId);
     focusSeatDetail(parsed.targetSeatId);
@@ -341,7 +404,7 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
     try {
       await recordUserMessage(nextSessionId, parsed.targetSeatId, parsed.instruction, projectRoot);
       await refreshSeatDetail(nextSessionId, parsed.targetSeatId, targetSeat, projectRoot);
-      await runSeatAssignment({
+      const result = await runSeatAssignment({
         projectRoot,
         sessionId: nextSessionId,
         runner: runnerTypeFromSeatId(parsed.targetSeatId),
@@ -351,12 +414,17 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
         controlMode: seats.find((seat) => seat.id === parsed.targetSeatId)?.controlMode ?? defaultControlMode,
         onEvent: (event) => {
           if (event.seatId !== parsed.targetSeatId) return;
-          return refreshSeatDetail(nextSessionId, parsed.targetSeatId, targetSeat, projectRoot);
+          return refreshSeatDetail(nextSessionId, parsed.targetSeatId, targetSeat, projectRoot, event);
         },
       });
+      const detailLines = await buildSeatDetailLines(nextSessionId, parsed.targetSeatId, targetSeat, projectRoot);
       setDeskLines([
-        ...(await buildSeatDetailLines(nextSessionId, parsed.targetSeatId, targetSeat, projectRoot)),
-        `#system Dispatch completed: ${parsed.targetSeatId}`,
+        ...detailLines,
+        result.status === "done"
+          ? `#system Dispatch completed: ${parsed.targetSeatId}`
+          : result.status === "stopped"
+            ? `#system Dispatch stopped: ${parsed.targetSeatId}`
+            : `#error Dispatch failed: ${summarizeDispatchError(result.error)}`,
       ]);
     } catch (error) {
       setDeskLines([
@@ -393,8 +461,14 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
     targetSeatId: string,
     targetSeat: SeatView | undefined,
     projectRoot: string,
+    latestEvent?: AgentRoomEvent,
   ): Promise<void> {
-    setDeskLines(await buildSeatDetailLines(nextSessionId, targetSeatId, targetSeat, projectRoot));
+    const state = await readSeatState(nextSessionId, targetSeatId, projectRoot);
+    if (state) {
+      const nextView = seatStateToView(targetSeatId, state);
+      setSeats((current) => current.map((seat) => (seat.id === targetSeatId ? nextView : seat)).sort(compareSeats));
+    }
+    setDeskLines(await buildSeatDetailLines(nextSessionId, targetSeatId, targetSeat, projectRoot, latestEvent));
   }
 
   async function handleClassroomCommand(commandInput: string): Promise<void> {
@@ -413,7 +487,8 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
         setDeskLines([arg ? `Agent not found: ${arg}` : "No selected agent to delete."]);
         return;
       }
-      await deleteAgentSeat(seat);
+      const nextSeats = await deleteAgentSeat(seat);
+      setMode(nextSeats.length > 0 ? "room" : "tool-select");
       return;
     }
     setDeskLines([`Unknown classroom command: /${command}`, "Type /help to see available classroom commands."]);
@@ -430,6 +505,7 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
           const restoredSeats = await ensureConfiguredSeats(sessionId, settings.seats, seats, projectRoot);
           setSeats(restoredSeats);
           setSelected((value) => Math.min(value, Math.max(restoredSeats.length - 1, 0)));
+          setMode("room");
           setDeskLines([`Restored ${settings.seats.length} saved agent(s) into this new session.`]);
           return;
         }
@@ -460,6 +536,7 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
       await persistRoomSettings(restoredSeats, projectRoot);
       setSeats(restoredSeats);
       setSelected((value) => Math.min(value, Math.max(restoredSeats.length - 1, 0)));
+      setMode("room");
       setDeskLines([`Restored ${configuredSeats.length} agent(s) from ${previousSessionId} into this new session.`]);
     } catch (error) {
       setDeskLines([`Restore failed: ${error instanceof Error ? error.message : String(error)}`]);
@@ -470,6 +547,54 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
     const ts = new Date().toISOString();
     await appendTranscript(sessionId, seatId, `User: ${instruction}\n`, projectRoot);
     await appendEvent(sessionId, { type: "activity.appended", seatId, text: `User: ${instruction}`, ts }, projectRoot);
+  }
+
+  async function forwardAgentInput(seat: SeatView, data: string): Promise<void> {
+    if (!sessionId) return;
+    const accepted = await adapterFor(seat.runnerType).sendInput(seat.id, data);
+    if (!accepted) {
+      setDeskLines([`No upstream input channel is active for ${seat.id}.`]);
+      return;
+    }
+    const projectRoot = process.cwd();
+    const existing = await readSeatState(sessionId, seat.id, projectRoot);
+    const ts = new Date().toISOString();
+    const decisionInput = !data.startsWith("\x1b[");
+    const nextState = existing?.state === "waiting_user" && decisionInput ? "running" : existing?.state ?? seat.state;
+    const nextNeedsUser = existing?.state === "waiting_user" && !decisionInput;
+    await appendTranscript(sessionId, seat.id, `AgentRoom: forwarded approval input (${formatForwardedInput(data)})\n`, projectRoot);
+    await writeSeatState(
+      sessionId,
+      {
+        seatId: seat.id,
+        runnerType: existing?.runnerType ?? seat.runnerType,
+        state: nextState,
+        currentTask: existing?.currentTask ?? seat.currentTask,
+        currentAction: decisionInput ? "approval input forwarded" : "approval selection forwarded",
+        workspacePath: existing?.workspacePath ?? seat.workspacePath ?? projectRoot,
+        controlMode: existing?.controlMode ?? seat.controlMode,
+        processId: existing?.processId,
+        startedAt: existing?.startedAt ?? seat.startedAt,
+        finishedAt: existing?.finishedAt ?? seat.finishedAt,
+        error: existing?.error,
+        needsUser: nextNeedsUser,
+        updatedAt: ts,
+      },
+      projectRoot,
+    );
+    setSeats((current) =>
+      current.map((candidate) =>
+        candidate.id === seat.id
+          ? {
+              ...candidate,
+              state: candidate.state === "waiting_user" && decisionInput ? "running" : candidate.state,
+              currentAction: decisionInput ? "approval input forwarded" : "approval selection forwarded",
+              needsUser: candidate.needsUser && !decisionInput,
+            }
+          : candidate,
+      ),
+    );
+    await refreshSeatDetail(sessionId, seat.id, seat, projectRoot);
   }
 
   async function handleAgentCommand(seat: SeatView, commandInput: string): Promise<void> {
@@ -495,8 +620,8 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
       return;
     }
     if (command === "delete" || command === "remove") {
-      await deleteAgentSeat(seat);
-      setMode("room");
+      const nextSeats = await deleteAgentSeat(seat);
+      setMode(nextSeats.length > 0 ? "room" : "tool-select");
       return;
     }
     if (command === "stop") {
@@ -543,7 +668,8 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
   async function stopSelectedSeat(seat: SeatView): Promise<void> {
     if (!sessionId) return;
     const projectRoot = process.cwd();
-    await adapterFor(seat.runnerType).stop(seat.id);
+    const existing = await readSeatState(sessionId, seat.id, projectRoot);
+    await adapterFor(seat.runnerType).stop(seat.id, existing?.processId);
     const ts = new Date().toISOString();
     await writeSeatState(sessionId, {
       seatId: seat.id,
@@ -559,10 +685,11 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
     setDeskLines([`Stopped ${seat.id}`]);
   }
 
-  async function deleteAgentSeat(seat: SeatView): Promise<void> {
+  async function deleteAgentSeat(seat: SeatView): Promise<SeatView[]> {
     const projectRoot = process.cwd();
     if (seat.state === "running" || seat.state === "queued") {
-      await adapterFor(seat.runnerType).stop(seat.id);
+      const existing = sessionId ? await readSeatState(sessionId, seat.id, projectRoot) : undefined;
+      await adapterFor(seat.runnerType).stop(seat.id, existing?.processId);
     }
     const nextSeats = seats.filter((current) => current.id !== seat.id).sort(compareSeats);
     await persistRoomSettings(nextSeats, projectRoot);
@@ -573,12 +700,12 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
       `Deleted ${seat.id} from this classroom.`,
       "Historical session files were kept under .agentroom/sessions.",
     ]);
+    return nextSeats;
   }
 
   const header = useMemo(() => (sessionId ? `session ${sessionId}` : "no active session"), [sessionId]);
   const selectedRunnerType = runnerChoices[selectedRunner];
   const selectedRunnerMeta = runnerTheme[selectedRunnerType];
-  const dispatchExample = selectedSeat ? `@${selectedSeat.runnerType}#${selectedSeat.id.split("-")[1] ?? "1"}` : "@codex#1";
   const isLoading = mode === "loading";
   const isToolSelect = mode === "tool-select";
   const isDetail = mode === "detail";
@@ -586,7 +713,7 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
   const headerMeta = [
     { label: "view", value: formatAppMode(mode) },
     { label: "agents", value: String(seats.length) },
-    { label: "cwd", value: compactPath(process.cwd(), 44) },
+    { label: "workspace", value: compactPath(process.cwd(), 44) },
   ];
 
   return (
@@ -630,10 +757,12 @@ export function AgentRoomApp({ interactive = true }: { interactive?: boolean }):
           isLoading
             ? "Starting a fresh classroom session..."
             : isToolSelect
-              ? `${selectedRunnerMeta.label} selected - Enter creates ${nextSeatId(selectedRunnerType, seats)}${seats.length > 0 ? ", Esc/Alt+S returns" : ", Esc exits"}`
+              ? `${selectedRunnerMeta.label} selected - Enter creates ${nextSeatId(selectedRunnerType, seats)}, r restores${seats.length > 0 ? ", b returns" : ""}, q exits`
               : isDetail
-                ? input || `(type a message or /help for ${selectedSeat?.name ?? dispatchExample}, Ctrl+X stops, Up/Down/PageUp/PageDown scroll, Esc returns)`
-                : input || `(a adds, /restore pulls history, /help commands${selectedSeat ? ", Enter opens, d deletes, arrows switch" : ""}, Esc exits)`
+                ? selectedSeat?.needsUser
+                  ? "upstream confirmation: y/a/Enter approve, s approve for session, n/r reject, Esc/c cancel"
+                  : input || `(type a message to ${selectedSeat?.name ?? "the selected agent"} or /help, Ctrl+X stops, Up/Down/PageUp/PageDown scroll, Esc returns)`
+                : input || `(type a task for ${selectedSeat?.name ?? "the selected agent"}, a adds, /help commands${selectedSeat ? ", Enter opens when input is empty, d deletes, arrows switch" : ""}, q exits)`
         }
         muted={!input}
         accentColor={activeAccent}
@@ -756,7 +885,7 @@ function seatStateToView(seatId: string, state: SeatStateFile | undefined): Seat
     finishedAt: state?.finishedAt,
     changedFiles: 0,
     runtimeMs: runtimeMs(state),
-    needsUser: false,
+    needsUser: Boolean(state?.needsUser || state?.state === "waiting_user"),
   };
 }
 
@@ -841,6 +970,7 @@ function seatsChanged(prev: SeatView[], next: SeatView[]): boolean {
       a.currentTask !== b.currentTask ||
       a.currentAction !== b.currentAction ||
       a.controlMode !== b.controlMode ||
+      a.needsUser !== b.needsUser ||
       a.finishedAt !== b.finishedAt
     ) {
       return true;
@@ -854,6 +984,7 @@ async function buildSeatDetailLines(
   seatId: string,
   fallbackSeat: SeatView | undefined,
   projectRoot: string,
+  latestEvent?: AgentRoomEvent,
 ): Promise<string[]> {
   const [state, tail] = await Promise.all([
     readSeatState(sessionId, seatId, projectRoot),
@@ -865,14 +996,35 @@ async function buildSeatDetailLines(
     `#meta Workspace: ${seat?.workspacePath ?? process.cwd()}`,
     `#meta Mode: ${formatControlMode(seat?.controlMode ?? defaultControlMode)}`,
     `#meta Task: ${seat?.currentTask ?? "Idle"}`,
+    `#meta Now: ${seat?.currentAction ?? seat?.stateText ?? "idle"}`,
     `#meta Commands: /help, /mode [plan|accept|full]`,
     "",
   ];
 
+  if (state?.state === "failed" && state.error) {
+    lines.push(`#error ${summarizeDispatchError(state.error)}`, "");
+  }
+  if (seat?.needsUser) {
+    lines.push(
+      "#approval Upstream CLI is waiting for confirmation.",
+      "#approval y/a/Enter approve, s approve for session, n/r reject, Esc/c cancel.",
+      "",
+    );
+  }
+
+  const liveStatus = liveStatusLine(seat);
+  if (liveStatus) lines.push(liveStatus, "");
+
   if (tail.length > 0) {
-    lines.push(...tail);
+    const latestLine = latestEventToTranscriptLine(latestEvent);
+    const visibleTail = appendUniqueTail(
+      tail.map(formatTranscriptLine).filter(isVisibleTranscriptLine),
+      latestLine,
+    );
+    lines.push("#meta Recent output", ...(visibleTail.length ? visibleTail.slice(-12) : ["#thinking Waiting for the next visible agent event..."]), "");
   } else {
-    lines.push("(no transcript yet)");
+    const latestLine = latestEventToTranscriptLine(latestEvent);
+    lines.push("#meta Recent output", latestLine ?? "#thinking Waiting for the first agent event...", "");
   }
 
   return lines;
@@ -921,7 +1073,7 @@ function agentCommandHelp(seat: SeatView): string[] {
     `${seat.name} commands:`,
     `/mode - show current permission mode (${formatControlMode(seat.controlMode)})`,
     "/mode plan - planning only; no file writes",
-    "/mode accept - normal work with confirmation for risky actions",
+    "/mode accept - normal work with routine file edits allowed",
     "/mode full - run end-to-end with full control",
     "/stop - stop the running agent (Ctrl+X or clear input and press s)",
     "/delete - remove this agent from the classroom",
@@ -963,19 +1115,113 @@ function controlModeDescription(controlMode: AgentControlMode): string {
     case "plan":
       return "Plan mode: the agent should analyze and plan only; Codex runs with read-only sandbox.";
     case "accept":
-      return "Accept mode: the agent can work in the workspace and should ask before risky actions.";
+      return "Accept mode: the agent can work in the workspace with routine file edits allowed.";
     case "full":
       return "Full control mode: Codex runs with approvals and sandbox bypassed for this agent.";
   }
 }
 
-function hasSeatReference(input: string): boolean {
-  return /@(codex|claude|gemini)#\d+/i.test(input);
+type InkInputKey = {
+  return?: boolean;
+  escape?: boolean;
+  upArrow?: boolean;
+  downArrow?: boolean;
+  leftArrow?: boolean;
+  rightArrow?: boolean;
+  ctrl?: boolean;
+};
+
+function approvalInputForKey(inputChar: string | undefined, key: InkInputKey): string | undefined {
+  if (key.ctrl) return undefined;
+  if (key.return) return "\r";
+  if (key.escape) return "c";
+  if (key.upArrow) return "\x1b[A";
+  if (key.downArrow) return "\x1b[B";
+  if (key.leftArrow) return "\x1b[D";
+  if (key.rightArrow) return "\x1b[C";
+  const normalized = inputChar?.toLowerCase();
+  if (normalized && ["y", "a", "s", "n", "r", "c"].includes(normalized)) return `${normalized}\r`;
+  return undefined;
+}
+
+function formatForwardedInput(data: string): string {
+  const normalized = data.replace(/\r/g, "Enter").replace(/\x1b/g, "Esc");
+  return normalized.trim() || "Enter";
 }
 
 function normalizeSeatId(value: string): string {
   const normalized = value.trim().replace(/^@/, "").replace("#", "-").toLowerCase();
   return normalized;
+}
+
+function summarizeDispatchError(error: string | undefined): string {
+  if (!error) return "runner failed";
+  const lines = error.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const meaningful = [...lines].reverse().find((line) => /ERROR:|error:|Forbidden|Unauthorized|timeout|超时|退出码/.test(line)) ?? lines.at(-1);
+  if (!meaningful) return "runner failed";
+  return meaningful.length <= 160 ? meaningful : `${meaningful.slice(0, 157)}...`;
+}
+
+function formatTranscriptLine(line: string): string {
+  const trimmed = line.trim();
+  if (/^(ERROR|error):/.test(trimmed) || /Forbidden|Unauthorized|authentication|permission denied|退出码|超时/i.test(trimmed)) {
+    return `#error ${trimmed}`;
+  }
+  return line;
+}
+
+function liveStatusLine(seat: SeatView | undefined): string | undefined {
+  if (!seat) return undefined;
+  const action = seat.currentAction?.replace(/\s+/g, " ").trim();
+  switch (seat.state) {
+    case "queued":
+      return "#thinking Queued and waiting to start...";
+    case "running":
+      return `#thinking ${seat.name} ${action && action !== "running" ? action : "is thinking..."}`;
+    case "waiting_user":
+      return "#approval Waiting for user confirmation.";
+    default:
+      return undefined;
+  }
+}
+
+function latestEventToTranscriptLine(event: AgentRoomEvent | undefined): string | undefined {
+  if (!event) return undefined;
+  if (event.type === "activity.appended") return formatTranscriptLine(event.text);
+  if (event.type === "seat.state_changed") return `#system State changed: ${event.state}`;
+  if (event.type === "assignment.started") return `#system Assignment started: ${event.assignmentId}`;
+  if (event.type === "assignment.completed") return `#system Assignment completed: ${event.assignmentId}`;
+  if (event.type === "assignment.failed") return `#error Assignment failed: ${event.error}`;
+  if (event.type === "file.changed") return `#tool File ${event.changeType}: ${event.path}`;
+  return undefined;
+}
+
+function appendUniqueTail(lines: string[], line: string | undefined): string[] {
+  if (!line || !line.trim()) return lines;
+  return lines.at(-1) === line ? lines : [...lines, line];
+}
+
+function isVisibleTranscriptLine(line: string): boolean {
+  if (!line.trim()) return false;
+  return (
+    line.startsWith("Claude: ") ||
+    line.startsWith("Codex: ") ||
+    line.startsWith("Gemini: ") ||
+    line.startsWith("User: ") ||
+    line.startsWith("#error ") ||
+    line.startsWith("#thinking ") ||
+    line.startsWith("#assistant ") ||
+    line.startsWith("#tool ") ||
+    line.startsWith("#tool-result ") ||
+    line.startsWith("#approval ") ||
+    line.startsWith("#terminal ") ||
+    line.startsWith("#stream ") ||
+    line.startsWith("#system ") ||
+    line.startsWith("#result ") ||
+    line.startsWith("#system Dispatch ") ||
+    line.startsWith("#meta ") ||
+    line.startsWith("AgentRoom: ")
+  );
 }
 
 function runtimeMs(state: SeatStateFile | undefined): number {

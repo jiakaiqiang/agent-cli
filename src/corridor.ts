@@ -23,6 +23,11 @@ export async function runCorridor(args = process.argv.slice(2)): Promise<void> {
     instruction: options.task,
     sourceSeatIds: [],
     allowDirty: options.allowDirty,
+    onEvent: (event) => {
+      if (event.type === "activity.appended") {
+        console.log(event.text);
+      }
+    },
   });
   console.log(`Session: ${session.id}`);
   console.log(`Seat path: ${result.seatPath}`);

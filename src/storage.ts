@@ -1,6 +1,7 @@
-import { access, appendFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import type { AgentRoomEvent, SeatStateFile, SessionInfo } from "./types.js";
+import type { AgentControlMode, AgentRoomEvent, RunnerType, SeatStateFile, SessionInfo } from "./types.js";
 
 export type SessionPaths = {
   root: string;
@@ -18,6 +19,15 @@ export type SeatPaths = {
   artifacts: string;
 };
 
+export type RoomSettings = {
+  seats: Array<{
+    seatId: string;
+    runnerType: RunnerType;
+    controlMode?: AgentControlMode;
+  }>;
+  updatedAt: string;
+};
+
 export function agentroomDir(projectRoot = process.cwd()): string {
   return path.join(projectRoot, ".agentroom");
 }
@@ -32,6 +42,14 @@ export function probeDir(projectRoot = process.cwd()): string {
 
 export function worktreesDir(projectRoot = process.cwd()): string {
   return path.join(agentroomDir(projectRoot), "worktrees");
+}
+
+export function settingsFile(projectRoot = process.cwd()): string {
+  return path.join(agentroomDir(projectRoot), "settings.json");
+}
+
+export function globalSettingsFile(): string {
+  return path.join(os.homedir(), ".agentroom", "settings.json");
 }
 
 export function createSessionId(date = new Date()): string {
@@ -90,6 +108,21 @@ export async function createSeat(sessionId: string, state: SeatStateFile, projec
   return paths;
 }
 
+export async function readRoomSettings(projectRoot = process.cwd()): Promise<RoomSettings | undefined> {
+  const projectSettings = await readSettingsFile(settingsFile(projectRoot));
+  if (projectSettings) return projectSettings;
+  return readSettingsFile(globalSettingsFile());
+}
+
+export async function writeRoomSettings(settings: RoomSettings, projectRoot = process.cwd()): Promise<void> {
+  await writeJson(settingsFile(projectRoot), settings);
+  try {
+    await writeJson(globalSettingsFile(), settings);
+  } catch {
+    // Project settings are authoritative; global settings are only a convenience fallback.
+  }
+}
+
 export async function appendEvent(sessionId: string, event: AgentRoomEvent, projectRoot = process.cwd()): Promise<void> {
   await mkdir(sessionPaths(sessionId, projectRoot).root, { recursive: true });
   await appendFile(sessionPaths(sessionId, projectRoot).events, `${JSON.stringify(event)}\n`, "utf8");
@@ -129,6 +162,14 @@ export async function readTranscriptTail(sessionId: string, seatId: string, line
   return lines.slice(-lineCount);
 }
 
+export async function watchTranscriptStream(sessionId: string, seatId: string, projectRoot = process.cwd()): Promise<string> {
+  const file = seatPaths(sessionId, seatId, projectRoot).transcript;
+  if (!(await exists(file))) return "";
+  const content = await readFile(file, "utf8");
+  const lines = content.split(/\r?\n/).filter(Boolean);
+  return lines.slice(-10).join("\n");
+}
+
 export async function writeSeatState(sessionId: string, state: SeatStateFile, projectRoot = process.cwd()): Promise<void> {
   const paths = seatPaths(sessionId, state.seatId, projectRoot);
   await mkdir(paths.root, { recursive: true });
@@ -138,7 +179,12 @@ export async function writeSeatState(sessionId: string, state: SeatStateFile, pr
 export async function readSeatState(sessionId: string, seatId: string, projectRoot = process.cwd()): Promise<SeatStateFile | undefined> {
   const file = seatPaths(sessionId, seatId, projectRoot).state;
   if (!(await exists(file))) return undefined;
-  return JSON.parse(await readFile(file, "utf8")) as SeatStateFile;
+  const raw = await readFile(file, "utf8");
+  try {
+    return JSON.parse(raw) as SeatStateFile;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function writeSummary(sessionId: string, seatId: string, summary: string, projectRoot = process.cwd()): Promise<void> {
@@ -176,9 +222,24 @@ export async function listSeatIds(sessionId: string, projectRoot = process.cwd()
   return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
 }
 
+const writeChain = new Map<string, Promise<void>>();
+
 export async function writeJson(file: string, data: unknown): Promise<void> {
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  const previous = writeChain.get(file) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      await mkdir(path.dirname(file), { recursive: true });
+      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+      await rename(tmp, file);
+    });
+  writeChain.set(file, next);
+  try {
+    await next;
+  } finally {
+    if (writeChain.get(file) === next) writeChain.delete(file);
+  }
 }
 
 export async function writeText(file: string, data: string): Promise<void> {
@@ -209,4 +270,35 @@ async function ensureFile(file: string): Promise<void> {
 export async function fileSize(file: string): Promise<number> {
   if (!(await exists(file))) return 0;
   return (await stat(file)).size;
+}
+
+async function readSettingsFile(file: string): Promise<RoomSettings | undefined> {
+  if (!(await exists(file))) return undefined;
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8")) as Partial<RoomSettings>;
+    if (!Array.isArray(parsed.seats)) return undefined;
+    const seats = parsed.seats
+      .filter((seat): seat is { seatId: string; runnerType: RunnerType; controlMode?: AgentControlMode } => {
+        return (
+          typeof seat?.seatId === "string" &&
+          (seat.runnerType === "codex" || seat.runnerType === "claude" || seat.runnerType === "gemini")
+        );
+      })
+      .map((seat) => ({
+        ...seat,
+        controlMode: parseControlMode(seat.controlMode),
+      }))
+      .filter((seat, index, all) => all.findIndex((candidate) => candidate.seatId === seat.seatId) === index);
+    if (seats.length === 0) return undefined;
+    return {
+      seats,
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function parseControlMode(value: unknown): AgentControlMode | undefined {
+  return value === "plan" || value === "accept" || value === "full" ? value : undefined;
 }

@@ -17,6 +17,7 @@ export async function recoverSession(sessionId: string, projectRoot = process.cw
       {
         ...state,
         state: "failed",
+        currentAction: "recovered stale process",
         error,
         finishedAt: ts,
         updatedAt: ts,

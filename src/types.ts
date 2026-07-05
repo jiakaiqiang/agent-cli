@@ -1,5 +1,7 @@
 export type RunnerType = "codex" | "claude" | "gemini";
 
+export type AgentControlMode = "plan" | "accept" | "full";
+
 export type SeatState = "idle" | "queued" | "running" | "done" | "failed" | "stopped";
 
 export type RunnerProbe = {
@@ -37,6 +39,10 @@ export type SeatView = {
   stateText: string;
   currentTask?: string;
   currentAction?: string;
+  workspacePath?: string;
+  controlMode: AgentControlMode;
+  startedAt?: string;
+  finishedAt?: string;
   changedFiles: number;
   runtimeMs: number;
   needsUser: false;
@@ -67,6 +73,7 @@ export type DeskView = {
   artifacts: ArtifactRef[];
   summary?: string;
   error?: string;
+  streamingContent?: string;
 };
 
 export type ClassroomView = {
@@ -107,6 +114,7 @@ export type Assignment = {
   sourceSeatIds: string[];
   instruction: string;
   contextPack: ContextPack;
+  controlMode: AgentControlMode;
   status: "queued" | "running" | "done" | "failed" | "stopped";
   createdAt: string;
   startedAt?: string;
@@ -131,6 +139,9 @@ export type SeatStateFile = {
   runnerType: RunnerType;
   state: SeatState;
   currentTask?: string;
+  currentAction?: string;
+  workspacePath?: string;
+  controlMode?: AgentControlMode;
   processId?: number;
   startedAt?: string;
   finishedAt?: string;
@@ -144,4 +155,3 @@ export type SessionInfo = {
   projectPath: string;
   startedAt: string;
 };
-

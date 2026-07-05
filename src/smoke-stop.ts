@@ -14,6 +14,7 @@ async function main(): Promise<void> {
     runnerType: "codex",
     state: "queued",
     currentTask: "agentroom-sleep",
+    controlMode: "accept",
     updatedAt: new Date().toISOString(),
   });
   const worktreePath = path.join(worktreesDir(projectRoot), session.id, `${seatId}-${Date.now()}`);
@@ -26,6 +27,7 @@ async function main(): Promise<void> {
     sourceSeatIds: [],
     instruction: "agentroom-sleep",
     contextPack,
+    controlMode: "accept",
     status: "queued",
     createdAt: new Date().toISOString(),
   };

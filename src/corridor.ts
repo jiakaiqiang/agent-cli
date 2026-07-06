@@ -9,6 +9,7 @@ type CorridorOptions = {
   seatId: string;
   task: string;
   allowDirty: boolean;
+  timeoutMs?: number;
 };
 
 export async function runCorridor(args = process.argv.slice(2)): Promise<void> {
@@ -23,6 +24,7 @@ export async function runCorridor(args = process.argv.slice(2)): Promise<void> {
     instruction: options.task,
     sourceSeatIds: [],
     allowDirty: options.allowDirty,
+    timeoutMs: options.timeoutMs,
     onEvent: (event) => {
       if (event.type === "activity.appended") {
         console.log(event.text);
@@ -42,6 +44,7 @@ export function parseCorridorArgs(args: string[]): CorridorOptions {
   let runner: RunnerType = "codex";
   let seatId = "codex-1";
   let allowDirty = false;
+  let timeoutMs: number | undefined;
   const taskParts: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -59,14 +62,27 @@ export function parseCorridorArgs(args: string[]): CorridorOptions {
       allowDirty = true;
       continue;
     }
+    if (arg === "--timeout") {
+      timeoutMs = parseTimeout(args[++index]);
+      continue;
+    }
     taskParts.push(arg);
   }
 
   const task = taskParts.join(" ").trim();
   if (!task) {
-    throw new Error('Usage: agentroom run [--runner codex|claude|gemini] [--seat codex-1] [--allow-dirty] "task"');
+    throw new Error('Usage: agentroom run [--runner codex|claude|gemini] [--seat codex-1] [--allow-dirty] [--timeout 30m|1800s|1800] "task"');
   }
-  return { runner, seatId, task, allowDirty };
+  return { runner, seatId, task, allowDirty, timeoutMs };
+}
+
+function parseTimeout(value: string | undefined): number {
+  if (!value) throw new Error("--timeout requires a value like 30m, 1800s, or 1800 (seconds)");
+  const match = /^(\d+)(m|s)?$/i.exec(value.trim());
+  if (!match) throw new Error(`Invalid --timeout value: ${value}. Use 30m, 1800s, or 1800.`);
+  const amount = Number(match[1]);
+  const unit = (match[2] ?? "s").toLowerCase();
+  return unit === "m" ? amount * 60_000 : amount * 1_000;
 }
 
 function parseRunner(value: string | undefined): RunnerType {

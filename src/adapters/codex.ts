@@ -12,6 +12,14 @@ type AppServerResult = {
 
 type JsonRecord = Record<string, unknown>;
 type DeltaBuffer = { prefix: string; text: string };
+type CodexTokenUsage = {
+  totalTokens?: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  modelContextWindow?: number;
+};
 
 const running = new Map<string, ChildProcessWithoutNullStreams>();
 const stopRequested = new Set<string>();
@@ -35,11 +43,20 @@ export class CodexAdapter extends ProcessRunnerAdapter {
   }
 
   promptCommand(prompt: string, controlMode: AgentControlMode = "accept", ctx?: RunnerRunContext): RunnerCommand {
-    if (process.env.AGENTROOM_CODEX_TRANSPORT === "exec") {
+    const transport = codexTransport();
+    if (transport === "exec") {
       return {
         command: process.env.AGENTROOM_CODEX_BIN ?? defaultCodexCommand(),
         args: codexExecArgs(controlMode, Boolean(ctx?.skipGitRepoCheck)),
         stdin: prompt,
+      };
+    }
+    if (transport === "terminal") {
+      return {
+        command: process.env.AGENTROOM_CODEX_BIN ?? defaultCodexCommand(),
+        args: [],
+        stdin: prompt,
+        terminal: true,
       };
     }
     return {
@@ -50,6 +67,19 @@ export class CodexAdapter extends ProcessRunnerAdapter {
   }
 
   async probe(projectRoot = process.cwd()): Promise<RunnerProbe> {
+    const transport = codexTransport();
+    if (transport === "exec") return super.probe(projectRoot);
+    if (transport === "terminal") {
+      const probe = await super.probe(projectRoot);
+      if (probe.available) {
+        probe.promptExitCode = 0;
+        probe.stdout = "Codex terminal transport selected; interactive prompt probe skipped.";
+        probe.supportsStreaming = true;
+        probe.supportsStructuredOutput = false;
+      }
+      return probe;
+    }
+
     const started = Date.now();
     const command = this.versionCommand();
     const version = await runCapture(command, projectRoot, 15_000);
@@ -83,6 +113,11 @@ export class CodexAdapter extends ProcessRunnerAdapter {
   }
 
   async *run(assignment: Assignment, ctx: RunnerRunContext): AsyncIterable<AgentRoomEvent> {
+    if (codexTransport() !== "app-server") {
+      yield* super.run(assignment, ctx);
+      return;
+    }
+
     const now = new Date().toISOString();
     const baseState: SeatStateFile = {
       seatId: assignment.targetSeatId,
@@ -102,10 +137,16 @@ export class CodexAdapter extends ProcessRunnerAdapter {
     const prompt = assignmentPrompt(assignment);
     const command = this.promptCommand(prompt, assignment.controlMode, ctx);
     const commandLine = `AgentRoom: runner command: ${formatCommandForLog(command)} (clientInfo codex-tui)`;
-    await appendTranscript(assignment.sessionId, assignment.targetSeatId, `${commandLine}\n`, ctx.projectRoot);
+    const promptMetricsLine = formatPromptMetrics(assignment, prompt);
+    await appendTranscript(assignment.sessionId, assignment.targetSeatId, `${commandLine}\n${promptMetricsLine}\n`, ctx.projectRoot);
     yield await emit(
       assignment.sessionId,
       { type: "activity.appended", seatId: assignment.targetSeatId, text: commandLine, ts: new Date().toISOString() },
+      ctx.projectRoot,
+    );
+    yield await emit(
+      assignment.sessionId,
+      { type: "activity.appended", seatId: assignment.targetSeatId, text: promptMetricsLine, ts: new Date().toISOString() },
       ctx.projectRoot,
     );
 
@@ -130,8 +171,10 @@ export class CodexAdapter extends ProcessRunnerAdapter {
     let threadStarted = false;
     let turnStarted = false;
     let lastActivityAt = Date.now();
+    let lastActivityLine = "starting Codex";
     const streamedItems = new Set<string>();
     const deltaBuffers = new Map<string, DeltaBuffer>();
+    let latestTokenUsage: CodexTokenUsage | undefined;
 
     const wake = () => {
       wakeActivityQueue?.();
@@ -154,6 +197,7 @@ export class CodexAdapter extends ProcessRunnerAdapter {
         persist(emit(assignment.sessionId, event, ctx.projectRoot));
       }
       const lastLine = visible[visible.length - 1];
+      lastActivityLine = lastLine;
       persist(
         appendTranscript(assignment.sessionId, assignment.targetSeatId, `${visible.join("\n")}\n`, ctx.projectRoot),
       );
@@ -298,6 +342,10 @@ export class CodexAdapter extends ProcessRunnerAdapter {
         if (typeof status === "string") enqueueLines([`#meta Codex status: ${status}`]);
         return;
       }
+      if (method === "thread/tokenUsage/updated") {
+        latestTokenUsage = readCodexTokenUsage(message) ?? latestTokenUsage;
+        return;
+      }
       if (method === "turn/started") {
         enqueueLines(["#meta Codex turn started"]);
         return;
@@ -319,6 +367,8 @@ export class CodexAdapter extends ProcessRunnerAdapter {
       }
       if (method === "turn/completed") {
         enqueueLines(flushCodexDeltaBuffers(deltaBuffers));
+        const tokenUsage = latestTokenUsage ?? readCodexTokenUsage(message);
+        if (tokenUsage) enqueueLines([formatCodexTokenUsage(tokenUsage)]);
         const status = readPath(message, ["params", "turn", "status"]);
         const error = readPath(message, ["params", "turn", "error", "message"]);
         complete(status === "completed", typeof error === "string" ? error : undefined);
@@ -326,12 +376,27 @@ export class CodexAdapter extends ProcessRunnerAdapter {
     };
 
     const timeout = setTimeout(() => {
-      fail(`执行超时：${ctx.timeoutMs}ms`);
+      fail(formatTimeoutError(ctx.timeoutMs, lastActivityLine, Date.now() - lastActivityAt));
       killProcessTree(child.pid);
     }, ctx.timeoutMs);
     const heartbeat = setInterval(() => {
       if (result) return;
-      if (Date.now() - lastActivityAt >= heartbeatIntervalMs) enqueueLines(["#thinking Codex is thinking..."]);
+      if (Date.now() - lastActivityAt >= heartbeatIntervalMs) {
+        persist(
+          writeSeatState(
+            assignment.sessionId,
+            {
+              ...baseState,
+              processId: child.pid,
+              state: pendingApprovals.has(assignment.targetSeatId) ? "waiting_user" : "running",
+              currentAction: pendingApprovals.has(assignment.targetSeatId) ? "waiting for upstream approval" : "is thinking...",
+              needsUser: pendingApprovals.has(assignment.targetSeatId),
+              updatedAt: new Date().toISOString(),
+            },
+            ctx.projectRoot,
+          ),
+        );
+      }
     }, heartbeatIntervalMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -364,18 +429,7 @@ export class CodexAdapter extends ProcessRunnerAdapter {
       method: "initialize",
       params: {
         clientInfo: { name: "codex-tui", title: "Codex", version: codexClientVersion() },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          optOutNotificationMethods: [
-            "command/exec/outputDelta",
-            "item/agentMessage/delta",
-            "item/plan/delta",
-            "item/fileChange/outputDelta",
-            "item/reasoning/summaryTextDelta",
-            "item/reasoning/textDelta",
-          ],
-        },
+        capabilities: codexClientCapabilities(),
       },
     });
 
@@ -573,18 +627,7 @@ async function runCodexAppServerCapture(
       method: "initialize",
       params: {
         clientInfo: { name: "codex-tui", title: "Codex", version: codexClientVersion() },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          optOutNotificationMethods: [
-            "command/exec/outputDelta",
-            "item/agentMessage/delta",
-            "item/plan/delta",
-            "item/fileChange/outputDelta",
-            "item/reasoning/summaryTextDelta",
-            "item/reasoning/textDelta",
-          ],
-        },
+        capabilities: codexClientCapabilities(),
       },
     });
   });
@@ -909,6 +952,88 @@ function formatFileChanges(params: JsonRecord): string[] {
   return Object.keys(params.fileChanges).slice(0, 8).map((file) => `File: ${file}`);
 }
 
+function formatPromptMetrics(assignment: Assignment, prompt: string): string {
+  const sources = assignment.contextPack.sourceSeats;
+  const summaryChars = sources.reduce((total, source) => total + charLength(source.summary ?? ""), 0);
+  const patchChars = sources.reduce((total, source) => total + charLength(source.patch ?? ""), 0);
+  return [
+    `#meta Prompt size: ${charLength(prompt)} chars`,
+    `sources: ${sources.length}`,
+    `source summaries: ${summaryChars} chars`,
+    `source patches: ${patchChars} chars`,
+  ].join("; ");
+}
+
+function readCodexTokenUsage(message: JsonRecord): CodexTokenUsage | undefined {
+  const candidates = [
+    readPath(message, ["params", "tokenUsage", "total"]),
+    readPath(message, ["params", "token_usage", "total"]),
+    readPath(message, ["params", "usage", "total"]),
+    readPath(message, ["params", "totalUsage"]),
+    readPath(message, ["params", "total_usage"]),
+    readPath(message, ["params", "total"]),
+    readPath(message, ["params", "turn", "usage"]),
+    readPath(message, ["params", "usage"]),
+    readPath(message, ["params", "tokenUsage"]),
+    readPath(message, ["params", "token_usage"]),
+  ];
+  const usage = candidates.map(tokenUsageFromValue).find((candidate): candidate is CodexTokenUsage => Boolean(candidate));
+  if (!usage) return undefined;
+
+  const modelContextWindow = firstNumber([
+    readPath(message, ["params", "tokenUsage", "modelContextWindow"]),
+    readPath(message, ["params", "tokenUsage", "model_context_window"]),
+    readPath(message, ["params", "token_usage", "modelContextWindow"]),
+    readPath(message, ["params", "token_usage", "model_context_window"]),
+    readPath(message, ["params", "modelContextWindow"]),
+    readPath(message, ["params", "model_context_window"]),
+  ]);
+  return modelContextWindow === undefined || usage.modelContextWindow !== undefined ? usage : { ...usage, modelContextWindow };
+}
+
+function tokenUsageFromValue(value: unknown): CodexTokenUsage | undefined {
+  if (!isRecord(value)) return undefined;
+  const usage: CodexTokenUsage = {
+    totalTokens: firstNumber([value.totalTokens, value.total_tokens, value.total]),
+    inputTokens: firstNumber([value.inputTokens, value.input_tokens, value.promptTokens, value.prompt_tokens, value.input]),
+    cachedInputTokens: firstNumber([value.cachedInputTokens, value.cached_input_tokens, value.cachedTokens, value.cached_tokens, value.cached]),
+    outputTokens: firstNumber([value.outputTokens, value.output_tokens, value.completionTokens, value.completion_tokens, value.output]),
+    reasoningOutputTokens: firstNumber([value.reasoningOutputTokens, value.reasoning_output_tokens, value.reasoningTokens, value.reasoning_tokens]),
+    modelContextWindow: firstNumber([value.modelContextWindow, value.model_context_window, value.contextWindow, value.context_window]),
+  };
+  if (usage.totalTokens === undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
+    usage.totalTokens = usage.inputTokens + usage.outputTokens;
+  }
+  return Object.values(usage).some((field) => field !== undefined) ? usage : undefined;
+}
+
+function formatCodexTokenUsage(usage: CodexTokenUsage): string {
+  const fields = [
+    usage.totalTokens !== undefined ? `total ${usage.totalTokens}` : undefined,
+    usage.inputTokens !== undefined ? `input ${usage.inputTokens}` : undefined,
+    usage.cachedInputTokens !== undefined ? `cached input ${usage.cachedInputTokens}` : undefined,
+    usage.outputTokens !== undefined ? `output ${usage.outputTokens}` : undefined,
+    usage.reasoningOutputTokens !== undefined ? `reasoning output ${usage.reasoningOutputTokens}` : undefined,
+    usage.modelContextWindow !== undefined ? `context window ${usage.modelContextWindow}` : undefined,
+  ].filter((field): field is string => Boolean(field));
+  return `#meta Codex token usage: ${fields.join(", ")}`;
+}
+
+function firstNumber(values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function charLength(value: string): number {
+  return Array.from(value).length;
+}
+
 function stringField(value: JsonRecord, key: string): string | undefined {
   const field = value[key];
   return typeof field === "string" && field.trim() ? field : undefined;
@@ -946,6 +1071,14 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function splitLines(value: string): string[] {
   return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function formatTimeoutError(timeoutMs: number, lastActivityLine: string | undefined, idleMs: number): string {
+  return `执行超时：${timeoutMs}ms（最后活动：${summarizeActivityLine(lastActivityLine)}；静默 ${formatSeconds(idleMs)}s）`;
+}
+
+function formatSeconds(ms: number): string {
+  return Math.max(0, Math.round(ms / 1000)).toString();
 }
 
 function summarizeActivityLine(line: string | undefined): string {
@@ -1008,6 +1141,14 @@ function codexClientVersion(): string {
   return version?.trim() || "0.142.5";
 }
 
+function codexClientCapabilities(): JsonRecord {
+  return {
+    experimentalApi: true,
+    requestAttestation: false,
+    optOutNotificationMethods: [],
+  };
+}
+
 function codexExecArgs(controlMode: AgentControlMode, skipGitRepoCheck: boolean): string[] {
   const gitRepoArgs = skipGitRepoCheck ? ["--skip-git-repo-check"] : [];
   const execArgs = ["exec", ...gitRepoArgs, "-"];
@@ -1019,6 +1160,12 @@ function codexExecArgs(controlMode: AgentControlMode, skipGitRepoCheck: boolean)
     case "full":
       return ["--dangerously-bypass-approvals-and-sandbox", ...execArgs];
   }
+}
+
+function codexTransport(): "app-server" | "exec" | "terminal" {
+  const transport = process.env.AGENTROOM_CODEX_TRANSPORT?.trim().toLowerCase();
+  if (transport === "exec" || transport === "terminal") return transport;
+  return "app-server";
 }
 
 function defaultCodexCommand(): string {

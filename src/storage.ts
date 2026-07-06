@@ -25,6 +25,7 @@ export type RoomSettings = {
     runnerType: RunnerType;
     controlMode?: AgentControlMode;
   }>;
+  allowDirty?: boolean;
   updatedAt: string;
 };
 
@@ -162,6 +163,12 @@ export async function readTranscriptTail(sessionId: string, seatId: string, line
   return lines.slice(-lineCount);
 }
 
+export async function readTranscript(sessionId: string, seatId: string, projectRoot = process.cwd()): Promise<string[]> {
+  const file = seatPaths(sessionId, seatId, projectRoot).transcript;
+  if (!(await exists(file))) return [];
+  return (await readFile(file, "utf8")).split(/\r?\n/).filter(Boolean);
+}
+
 export async function watchTranscriptStream(sessionId: string, seatId: string, projectRoot = process.cwd()): Promise<string> {
   const file = seatPaths(sessionId, seatId, projectRoot).transcript;
   if (!(await exists(file))) return "";
@@ -292,6 +299,7 @@ async function readSettingsFile(file: string): Promise<RoomSettings | undefined>
     if (seats.length === 0) return undefined;
     return {
       seats,
+      allowDirty: typeof parsed.allowDirty === "boolean" ? parsed.allowDirty : undefined,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
     };
   } catch {

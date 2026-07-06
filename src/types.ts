@@ -97,6 +97,7 @@ export type SourceSeatContext = {
   seatId: string;
   summary?: string;
   patch?: string;
+  transcriptTail?: string[];
   changedFiles: string[];
   artifacts: ArtifactRef[];
 };
@@ -114,6 +115,7 @@ export type Assignment = {
   sourceSeatIds: string[];
   instruction: string;
   contextPack: ContextPack;
+  assembledPrompt?: string;
   controlMode: AgentControlMode;
   status: "queued" | "running" | "done" | "failed" | "stopped";
   createdAt: string;
@@ -132,7 +134,11 @@ export type AgentRoomEvent =
   | { type: "file.changed"; seatId: string; path: string; changeType: "M" | "A" | "D"; ts: string }
   | { type: "assignment.started"; assignmentId: string; seatId: string; ts: string }
   | { type: "assignment.completed"; assignmentId: string; seatId: string; ts: string }
-  | { type: "assignment.failed"; assignmentId: string; seatId: string; error: string; ts: string };
+  | { type: "assignment.failed"; assignmentId: string; seatId: string; error: string; ts: string }
+  | { type: "context.entry_recorded"; seatId: string; entryId: string; kind: string; ts: string }
+  | { type: "context.collab_opened"; collabId: string; memberSeatIds: string[]; ts: string }
+  | { type: "context.collab_closed"; collabId: string; ts: string }
+  | { type: "context.seat_cleared"; seatId: string; ts: string };
 
 export type SeatStateFile = {
   seatId: string;

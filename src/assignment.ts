@@ -1,8 +1,9 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { adapterFor } from "./adapters/index.js";
 import { runCapture } from "./adapters/runner.js";
-import { buildContextPack } from "./contextpack.js";
+import { createCollabManager } from "./collab/index.js";
+import { parseChangedFiles } from "./contextpack.js";
 import {
   appendEvent,
   appendTranscript,
@@ -52,8 +53,9 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
   const createdAt = new Date().toISOString();
   const assignmentId = `assign_${Date.now()}`;
   const fallbackWorktreePath = path.join(worktreesDir(options.projectRoot), options.sessionId, `${options.seatId}-${Date.now()}`);
+  const executionRoot = await resolveInstructionWorkspace(options.projectRoot, options.instruction);
   let assignment: Assignment | undefined;
-  let workspacePath = options.projectRoot;
+  let workspacePath = executionRoot;
   let finalStatus: RunSeatAssignmentResult["status"] = "done";
   let finalError: string | undefined;
 
@@ -78,7 +80,17 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
   );
 
   try {
-    const workspace = await resolveExecutionWorkspace(options.projectRoot, fallbackWorktreePath, Boolean(options.allowDirty));
+    if (executionRoot !== options.projectRoot) {
+      const message = `AgentRoom: detected task workspace ${executionRoot}`;
+      await appendTranscript(options.sessionId, options.seatId, `${message}\n`, options.projectRoot);
+      await appendEvent(
+        options.sessionId,
+        { type: "activity.appended", seatId: options.seatId, text: message, ts: new Date().toISOString() },
+        options.projectRoot,
+      );
+    }
+
+    const workspace = await resolveExecutionWorkspace(executionRoot, fallbackWorktreePath, Boolean(options.allowDirty));
     workspacePath = workspace.cwd;
     await writeSeatState(
       options.sessionId,
@@ -108,14 +120,40 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
       );
     }
 
-    const contextPack = await buildContextPack(options.sessionId, options.instruction, options.sourceSeatIds, options.projectRoot);
+    const collabManager = createCollabManager(options.projectRoot);
+
+    let collabId: string | undefined;
+    if (options.sourceSeatIds.length > 0) {
+      const collab = await collabManager.openCollab(options.sessionId, [
+        options.seatId,
+        ...options.sourceSeatIds,
+      ]);
+      collabId = collab.id;
+
+      for (const sourceSeatId of options.sourceSeatIds) {
+        await collabManager.pinToCollab(options.sessionId, collabId, sourceSeatId);
+      }
+    }
+
+    const assembled = await collabManager.pull({
+      sessionId: options.sessionId,
+      seatId: options.seatId,
+      collabId,
+      instruction: options.instruction,
+    });
+
     assignment = {
       id: assignmentId,
       sessionId: options.sessionId,
       targetSeatId: options.seatId,
       sourceSeatIds: options.sourceSeatIds,
       instruction: options.instruction,
-      contextPack,
+      contextPack: {
+        userInstruction: options.instruction,
+        sourceSeats: [],
+        artifacts: [],
+      },
+      assembledPrompt: assembled.promptFragment,
       controlMode: options.controlMode ?? "accept",
       status: "queued",
       createdAt,
@@ -125,7 +163,7 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
     for await (const event of adapter.run(assignment, {
       projectRoot: options.projectRoot,
       cwd: workspace.cwd,
-      timeoutMs: options.timeoutMs ?? 10 * 60_000,
+      timeoutMs: options.timeoutMs ?? 30 * 60_000,
       skipGitRepoCheck: workspace.mode === "shared",
     })) {
       if (event.type === "assignment.failed") {
@@ -145,6 +183,31 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
 
     const summary = await collectSummary(workspace.cwd, options.instruction, stat.stdout, patch.stdout);
     await writeSummary(options.sessionId, options.seatId, summary, options.projectRoot);
+
+    const paths = seatPaths(options.sessionId, options.seatId, options.projectRoot);
+    const changedFiles = parseChangedFiles(patch.stdout);
+
+    await collabManager.record(options.sessionId, options.seatId, {
+      seatId: options.seatId,
+      kind: "summary",
+      createdAt: new Date().toISOString(),
+      sizeBytes: 0,
+      refPath: paths.summary,
+      meta: { changedFiles },
+    });
+
+    await collabManager.record(options.sessionId, options.seatId, {
+      seatId: options.seatId,
+      kind: "patch",
+      createdAt: new Date().toISOString(),
+      sizeBytes: 0,
+      refPath: paths.patch,
+      meta: { changedFiles, diffStat: stat.stdout },
+    });
+
+    if (collabId) {
+      await collabManager.closeCollab(options.sessionId, collabId);
+    }
   } catch (error) {
     const ts = new Date().toISOString();
     const message = error instanceof Error ? error.message : String(error);
@@ -176,6 +239,57 @@ export async function runSeatAssignment(options: RunSeatAssignmentOptions): Prom
     status: finalStatus,
     error: finalError,
   };
+}
+
+async function resolveInstructionWorkspace(projectRoot: string, instruction: string): Promise<string> {
+  for (const candidate of extractAbsolutePathCandidates(instruction)) {
+    const directory = await existingDirectoryForPath(candidate);
+    if (!directory) continue;
+    const gitRoot = await gitTopLevel(directory);
+    if (gitRoot) return gitRoot;
+  }
+  return projectRoot;
+}
+
+function extractAbsolutePathCandidates(value: string): string[] {
+  const candidates = new Set<string>();
+  const quotedPathPattern = /["'`](.*?(?:[A-Za-z]:[\\/]|\/).*?)["'`]/g;
+  const windowsPathPattern = /[A-Za-z]:[\\/][^\s"'`<>|]+/g;
+  const posixPathPattern = /(?<![\w.-])\/[^\s"'`<>|]+/g;
+
+  for (const match of value.matchAll(quotedPathPattern)) {
+    const candidate = match[1]?.trim();
+    if (candidate) candidates.add(stripTrailingPathPunctuation(candidate));
+  }
+  for (const match of value.matchAll(windowsPathPattern)) {
+    candidates.add(stripTrailingPathPunctuation(match[0]));
+  }
+  for (const match of value.matchAll(posixPathPattern)) {
+    candidates.add(stripTrailingPathPunctuation(match[0]));
+  }
+
+  return [...candidates].filter(Boolean);
+}
+
+function stripTrailingPathPunctuation(value: string): string {
+  return value.replace(/[),.;!?，。；！？）】]+$/u, "");
+}
+
+async function existingDirectoryForPath(candidate: string): Promise<string | undefined> {
+  try {
+    const resolved = path.resolve(candidate);
+    const info = await stat(resolved);
+    return info.isDirectory() ? resolved : path.dirname(resolved);
+  } catch {
+    return undefined;
+  }
+}
+
+async function gitTopLevel(cwd: string): Promise<string | undefined> {
+  const result = await git(["rev-parse", "--show-toplevel"], cwd);
+  if (result.exitCode !== 0) return undefined;
+  const root = result.stdout.trim();
+  return root ? path.resolve(root) : undefined;
 }
 
 async function resolveExecutionWorkspace(projectRoot: string, worktreePath: string, allowDirty: boolean): Promise<ExecutionWorkspace> {
@@ -256,6 +370,10 @@ function parseDiffStatFiles(diffStat: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.split("|")[0]?.trim())
     .filter((value): value is string => Boolean(value && !value.includes("files changed")));
+}
+
+function uniqueSeatIds(seatIds: string[]): string[] {
+  return seatIds.filter((seatId, index, all) => seatId && all.indexOf(seatId) === index);
 }
 
 async function git(args: string[], cwd: string): Promise<GitCapture> {

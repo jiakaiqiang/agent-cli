@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import process from "node:process";
+import { shouldUseDirectAgentPrompt } from "../agent-meta.js";
 import { formatContextPack } from "../contextpack.js";
 import type { AgentControlMode, AgentRoomEvent, Assignment, RunnerProbe, RunnerType, SeatStateFile } from "../types.js";
 import { appendEvent, appendTranscript, writeSeatState } from "../storage.js";
@@ -505,10 +506,17 @@ export function sendRunnerInput(instanceId: string, data: string): boolean {
 }
 
 export function assignmentPrompt(assignment: Assignment): string {
+  if (shouldUseDirectAgentPrompt(assignment.instruction)) {
+    return assignment.instruction;
+  }
+
+  const contextFragment = assignment.assembledPrompt ?? formatContextPack(assignment.contextPack);
+
   return [
     controlModeInstruction(assignment.controlMode),
+    "AgentRoom orchestration rule: do not start AgentRoom, dispatch other seats, or create nested git worktrees from inside this runner. If another seat is mentioned, complete only your assigned work and leave cross-agent routing to the AgentRoom TUI.",
     "",
-    formatContextPack(assignment.contextPack),
+    contextFragment,
     "",
     "完成任务后，请在 worktree 根目录写入 AGENTROOM_SUMMARY.md，并使用 YAML front matter 字段：",
     "summary, changed_files, tests, claims.",

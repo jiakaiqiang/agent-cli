@@ -27,7 +27,7 @@ export function DeskPanel({
       <Box justifyContent="space-between">
         <Text>
           <Text bold color={accentColor}>{title}</Text>
-          <Text color={tuiTheme.dim}> / activity</Text>
+          <Text color={tuiTheme.dim}> / transcript</Text>
         </Text>
         <Text color={tuiTheme.dim}>{scrollLabel}</Text>
       </Box>

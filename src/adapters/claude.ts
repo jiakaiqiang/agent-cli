@@ -1,5 +1,5 @@
 import { ProcessRunnerAdapter, type RunnerCommand } from "./runner.js";
-import type { AgentControlMode, RunnerType } from "../types.js";
+import type { AgentControlMode, RunnerProbe, RunnerType } from "../types.js";
 
 export class ClaudeAdapter extends ProcessRunnerAdapter {
   type: RunnerType = "claude";
@@ -10,7 +10,7 @@ export class ClaudeAdapter extends ProcessRunnerAdapter {
   }
 
   promptCommand(prompt: string, controlMode: AgentControlMode = "accept"): RunnerCommand {
-    if (process.env.AGENTROOM_CLAUDE_TRANSPORT === "terminal") {
+    if (claudeTransport() === "terminal") {
       return {
         command: process.env.AGENTROOM_CLAUDE_BIN ?? defaultClaudeCommand(),
         args: ["--permission-mode", "default", prompt],
@@ -24,9 +24,24 @@ export class ClaudeAdapter extends ProcessRunnerAdapter {
     };
   }
 
+  async probe(projectRoot = process.cwd()): Promise<RunnerProbe> {
+    const probe = await super.probe(projectRoot);
+    if (claudeTransport() === "terminal" && probe.available) {
+      probe.promptExitCode = 0;
+      probe.stdout = "Claude terminal transport selected; interactive prompt probe skipped.";
+      probe.supportsStreaming = true;
+      probe.supportsStructuredOutput = false;
+    }
+    return probe;
+  }
+
   createStdoutParser(): (chunk: string) => string[] {
     return createClaudeStreamParser();
   }
+}
+
+function claudeTransport(): "print" | "terminal" {
+  return process.env.AGENTROOM_CLAUDE_TRANSPORT?.trim().toLowerCase() === "terminal" ? "terminal" : "print";
 }
 
 function defaultClaudeCommand(): string {

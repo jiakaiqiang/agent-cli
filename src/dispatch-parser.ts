@@ -6,8 +6,8 @@ export type ParsedDispatch = {
   instruction: string;
 };
 
-const seatRefPattern = /@(codex|claude|gemini)#(\d+)/gi;
-const leadingSeatRefPattern = /^@(codex|claude|gemini)#(\d+)\b/i;
+const seatRefPattern = /@(codex|claude|gemini)\s*#\s*(\d+)/gi;
+const leadingSeatRefPattern = /^@(codex|claude|gemini)\s*#\s*(\d+)\b/i;
 
 export function parseDispatch(input: string): ParsedDispatch {
   const refs = [...input.matchAll(seatRefPattern)];
